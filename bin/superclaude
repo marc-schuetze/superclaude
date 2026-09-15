@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-CLAUDE_CMD="claude --dangerously-skip-permissions"
+CLAUDE_CMD="env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY claude --dangerously-skip-permissions"
 SESSION_PREFIX="sc"
 
 # Share Codeman's dedicated tmux socket so sessions created here are visible in

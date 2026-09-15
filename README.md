@@ -13,7 +13,7 @@ Three scripts:
 ## Install
 
 ```sh
-git clone git@github.com:scharc/superclaude.git
+git clone git@github.com:marc-schuetze/superclaude.git
 ln -s "$PWD/superclaude/bin/superclaude" ~/.local/bin/superclaude
 ln -s "$PWD/superclaude/bin/sc"          ~/.local/bin/sc
 ln -s "$PWD/superclaude/bin/scd"         ~/.local/bin/scd   # optional: remote-to-desktop
