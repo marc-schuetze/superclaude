@@ -13,7 +13,7 @@ Three scripts:
 ## Roles and agents
 
 A **role** is a directory under `$SC_AGENTS_DIR` (default `/x/agents`, a git repo
-synced between machines) with its own `CLAUDE.md`, `.mcp.json`, `.claude/` and
+synced between machines) with its own `CLAUDE.md`, `mcp.json` (loaded strictly, nothing else), `.claude/` and
 `memory/`. `sc home` drops you into the home specialist with that role's
 instructions, MCP servers and auto-memory, no further choice at start. The
 role's auto-memory is symlinked from `~/.claude/projects/<encoded>/memory` into
