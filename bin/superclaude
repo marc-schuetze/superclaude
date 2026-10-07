@@ -275,6 +275,12 @@ case "${1:-}" in
         if [[ -n "$ra" && "$ra" != "$SC_AGENT" && -z "${SC_AGENT_EXPLICIT:-}" ]]; then
             SC_AGENT="$ra"; CLAUDE_CMD="$(agent_cmd "$SC_AGENT")" || exit 1
         fi
+        # MCP per role: with a .mcp.json in the role dir, claude loads only that
+        # list (no user-scope servers leak in). Other harnesses read their own
+        # config; nothing to do for them here.
+        if [[ "$SC_AGENT" == "claude" && -f "$dir/.mcp.json" ]]; then
+            CLAUDE_CMD="$CLAUDE_CMD --mcp-config $dir/.mcp.json --strict-mcp-config"
+        fi
         attach_or_create_dir "$dir"
         ;;
     roles)
