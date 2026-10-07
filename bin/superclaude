@@ -191,7 +191,8 @@ pick_and_attach_all() {
 create_and_attach() {
     local session_name="$1" dir="${2:-$(pwd)}"
     tm new-session -d -s "$session_name" -c "$dir" "$CLAUDE_CMD"
-    tm set-option -t "=$session_name" @sc_agent "$SC_AGENT"
+    # set-option does not take the "=" exact-match prefix; the bare name is exact enough here.
+    tm set-option -t "$session_name" @sc_agent "$SC_AGENT"
     echo "Created session: $session_name ($SC_AGENT)"
     attach_or_switch "$session_name"
 }
