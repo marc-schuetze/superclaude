@@ -4,26 +4,7 @@
 
 set -euo pipefail
 
-# Harness per session: claude (default), codex, opencode, vibe. Chosen by
-# `-a NAME`, $SC_AGENT, or a role's `.sc` file (`agent=codex`). The session
-# keeps `sc|` as prefix; the harness is stored on the tmux session as @sc_agent.
-SC_AGENT="${SC_AGENT:-claude}"
-agent_cmd() {
-    case "$1" in
-        claude)   echo "env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY claude --dangerously-skip-permissions" ;;
-        codex)    echo "codex --dangerously-bypass-approvals-and-sandbox" ;;
-        opencode) echo "${SO_OPENCODE_CMD:-opencode --auto}" ;;
-        vibe)     echo "vibe --yolo --trust" ;;
-        *) echo "unknown agent: $1 (claude|codex|opencode|vibe)" >&2; return 1 ;;
-    esac
-}
-CLAUDE_CMD="$(agent_cmd "$SC_AGENT")" || exit 1
-
-# Roles: one directory per specialist under $SC_AGENTS_DIR (a git repo synced
-# between machines). A role dir carries CLAUDE.md, mcp.json, .claude/ and its
-# own auto-memory, so `superclaude role home` is "Claude Code as the home
-# specialist" without any further choice at start.
-SC_AGENTS_DIR="${SC_AGENTS_DIR:-/x/agents}"
+CLAUDE_CMD="env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY claude --dangerously-skip-permissions"
 SESSION_PREFIX="sc"
 
 # Share Codeman's dedicated tmux socket so sessions created here are visible in
@@ -86,39 +67,6 @@ next_session_name() {
     echo "${base_name}-${i}"
 }
 
-roles() {
-    # A role is any dir under $SC_AGENTS_DIR that has a CLAUDE.md.
-    local d
-    for d in "$SC_AGENTS_DIR"/*/; do
-        [[ -f "${d}CLAUDE.md" ]] && basename "$d"
-    done 2>/dev/null
-}
-
-role_dir() {
-    local d="$SC_AGENTS_DIR/$1"
-    [[ -f "$d/CLAUDE.md" ]] || { echo "no such role: $1 (roles: $(roles | tr '\n' ' '))" >&2; return 1; }
-    echo "$d"
-}
-
-ensure_role_memory() {
-    # Claude Code keeps auto-memory under ~/.claude/projects/<encoded cwd>/memory.
-    # Point that at <role>/memory so the role's memory lives in the synced repo.
-    # Encoding mirrors Claude Code: '/' and '.' become '-'.
-    local dir="$1" enc proj
-    enc="${dir//[\/.]/-}"
-    proj="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$enc"
-    mkdir -p "$dir/memory" "$proj"
-    if [[ -L "$proj/memory" ]]; then
-        return 0
-    fi
-    if [[ -d "$proj/memory" ]]; then
-        # Real dir from an earlier run: fold its files into the repo copy.
-        cp -an "$proj/memory/." "$dir/memory/" 2>/dev/null || true
-        rm -rf "$proj/memory"
-    fi
-    ln -s "$dir/memory" "$proj/memory"
-}
-
 usage() {
     cat <<'EOF'
 superclaude - Claude Code with tmux session management
@@ -130,14 +78,7 @@ Usage:
   superclaude list all     Interactive picker (fzf) over ALL sc sessions
   superclaude attach NAME  Attach to a specific session
   superclaude kill NAME    Kill a specific session
-  superclaude role ROLE    Attach or create the session of a role ($SC_AGENTS_DIR/ROLE)
-  superclaude roles        List roles
-  superclaude open DIR     Attach or create the session of a directory
   superclaude help         Show this help
-
-Options (before the subcommand):
-  -a, --agent NAME         Harness: claude (default), codex, opencode, vibe
-                           (also $SC_AGENT, or `agent=NAME` in a role's .sc file)
 
 Any other arguments are passed directly to claude.
 EOF
@@ -189,40 +130,13 @@ pick_and_attach_all() {
 }
 
 create_and_attach() {
-    local session_name="$1" dir="${2:-$(pwd)}"
-    tm new-session -d -s "$session_name" -c "$dir" "$CLAUDE_CMD"
-    # set-option does not take the "=" exact-match prefix; the bare name is exact enough here.
-    tm set-option -t "$session_name" @sc_agent "$SC_AGENT"
-    echo "Created session: $session_name ($SC_AGENT)"
+    local session_name="$1"
+    tm new-session -d -s "$session_name" -c "$(pwd)" "$CLAUDE_CMD"
+    echo "Created session: $session_name"
     attach_or_switch "$session_name"
 }
 
-role_agent() {
-    # `agent=NAME` in <role>/.sc sets the role's default harness.
-    local f="$1/.sc" a
-    [[ -f "$f" ]] || return 0
-    a="$(sed -n 's/^agent=//p' "$f" | tail -1)"
-    [[ -n "$a" ]] && echo "$a"
-}
-
-attach_or_create_dir() {
-    # Sticky session for an arbitrary directory (roles, recent projects).
-    local dir="$1" existing
-    existing="$(tm list-sessions -F '#{session_name}' 2>/dev/null | grep -x "$(slug "$dir")\(-[0-9]\+\)\?" | head -1 || true)"
-    if [[ -n "$existing" ]]; then
-        attach_or_switch "$existing"
-    else
-        create_and_attach "$(slug "$dir")" "$dir"
-    fi
-}
-
 # --- main ---
-
-# Global option: -a|--agent NAME (before the subcommand).
-if [[ "${1:-}" == "-a" || "${1:-}" == "--agent" ]]; then
-    SC_AGENT="${2:?agent name}"; SC_AGENT_EXPLICIT=1; shift 2
-    CLAUDE_CMD="$(agent_cmd "$SC_AGENT")" || exit 1
-fi
 
 case "${1:-}" in
     "")
@@ -266,29 +180,6 @@ case "${1:-}" in
         fi
         tm kill-session -t "=$2"
         echo "Killed session: $2"
-        ;;
-    role)
-        [[ -n "${2:-}" ]] || { echo "Usage: superclaude role ROLE"; exit 1; }
-        dir="$(role_dir "$2")" || exit 1
-        ensure_role_memory "$dir"
-        ra="$(role_agent "$dir")"
-        if [[ -n "$ra" && "$ra" != "$SC_AGENT" && -z "${SC_AGENT_EXPLICIT:-}" ]]; then
-            SC_AGENT="$ra"; CLAUDE_CMD="$(agent_cmd "$SC_AGENT")" || exit 1
-        fi
-        # MCP per role: with a mcp.json in the role dir, claude loads only that
-        # list (no user-scope servers leak in). Other harnesses read their own
-        # config; nothing to do for them here.
-        if [[ "$SC_AGENT" == "claude" && -f "$dir/mcp.json" ]]; then
-            CLAUDE_CMD="$CLAUDE_CMD --mcp-config $dir/mcp.json --strict-mcp-config"
-        fi
-        attach_or_create_dir "$dir"
-        ;;
-    roles)
-        roles
-        ;;
-    open)
-        [[ -d "${2:-}" ]] || { echo "Usage: superclaude open DIR"; exit 1; }
-        attach_or_create_dir "$(cd "$2" && pwd)"
         ;;
     help|--help|-h)
         usage

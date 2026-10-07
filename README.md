@@ -10,33 +10,6 @@ Three scripts:
 - **`sc`** — short, mobile-friendly wrapper around the same session pool. `sc` opens an `fzf` picker filling the screen, with "+ new session" pinned at the top. `sc n` creates new, `sc <N>` attaches by row index. Pairs with [`sc.tmux`](#tmux-integration) for one-tap session switching from inside tmux.
 - **`scd`** — `sc`, but on the desktop node over `mosh`. Runs the remote `sc` on `desktop.marc.zkm.de` so you pick from *its* session pool, with mosh's roaming/reconnect for flaky links. Same arg surface as `sc` (`scd`, `scd n`, `scd <N>`). Client-side only — install it wherever you *initiate* from (laptop/phone), not on the desktop itself.
 
-## Roles and agents
-
-A **role** is a directory under `$SC_AGENTS_DIR` (default `/x/agents`, a git repo
-synced between machines) with its own `CLAUDE.md`, `mcp.json` (loaded strictly, nothing else), `.claude/` and
-`memory/`. `sc home` drops you into the home specialist with that role's
-instructions, MCP servers and auto-memory, no further choice at start. The
-role's auto-memory is symlinked from `~/.claude/projects/<encoded>/memory` into
-`<role>/memory`, so it travels with the repo.
-
-A role may carry a `.sc` file with `agent=codex|opencode|vibe` to pick its
-harness; `sc -a codex …` overrides for one session. Claude is the default.
-
-```
-sc            picker: open sessions, then roles (a), then recent projects (p)
-sc a          roles only
-sc p          recent projects only (from ~/.claude/history.jsonl)
-sc home       attach or create the role session
-sc ~/foo      attach or create the session of a directory
-sc -a codex n new codex session in $PWD
-```
-
-zsh completion (`sc <Tab>` lists roles, `-a <Tab>` lists harnesses):
-
-```sh
-ln -s "$PWD/superclaude/completions/_sc" ~/.zsh/completions/_sc   # dir must be in $FPATH
-```
-
 ## Install
 
 ```sh
@@ -57,16 +30,10 @@ superclaude list         list sessions for $PWD
 superclaude list all     fzf picker over ALL sc sessions
 superclaude attach NAME  attach to a specific session
 superclaude kill NAME    kill a specific session
-superclaude role ROLE    attach or create the role's session (memory symlink ensured)
-superclaude roles        list roles
-superclaude open DIR     attach or create the session of a directory
 
-sc                       fzf picker: sessions, roles, recent projects; "+ new" at top
+sc                       fzf picker over ALL sc sessions, "+ new" at top
 sc n                     new session in $PWD
 sc <N>                   attach to row N (most-recent first)
-sc a | sc p              roles only | recent projects only
-sc ROLE | sc DIR         attach or create the session of a role / directory
-sc -a AGENT ...          harness: claude (default), codex, opencode, vibe
 
 scd                      sc picker on the desktop node (over mosh)
 scd n                    new session on the desktop
