@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # sc - mobile-friendly superclaude session picker (fzf UI)
-# `sc`     -> fzf picker over all sc sessions, with "new session" at top
-# `sc n`   -> create new session in $PWD
-# `sc <N>` -> attach directly to N-th session (most-recent first)
+# `sc`        -> fzf picker: open sessions, then roles, then recent projects
+# `sc n`      -> create new session in $PWD
+# `sc <N>`    -> attach directly to N-th session (most-recent first)
+# `sc a`      -> pick a role (agent) from $SC_AGENTS_DIR
+# `sc p`      -> pick a recent project (from Claude Code's history)
+# `sc ROLE`   -> attach or create the role's session
+# `sc DIR`    -> attach or create the session of a directory
+# `sc -a X …` -> same, but run harness X (claude|codex|opencode|vibe)
 
 set -euo pipefail
 
 SESSION_PREFIX="sc"
+SC_AGENTS_DIR="${SC_AGENTS_DIR:-/x/agents}"
+SC_RECENT_MAX="${SC_RECENT_MAX:-12}"
+AGENT_OPT=()
 
 # Share Codeman's dedicated tmux socket (see bin/superclaude for rationale).
 SC_TMUX_SOCKET="${SC_TMUX_SOCKET:-${CODEMAN_TMUX_SOCKET:-codeman${CODEMAN_INSTANCE:+-${CODEMAN_INSTANCE}}}}"
@@ -26,7 +34,7 @@ attach_or_switch() {
 
 list_rows() {
     tm list-panes -a \
-        -F $'#{session_name}\t#{pane_active}\t#{session_attached}\t#{session_activity}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}' \
+        -F $'#{session_name}\t#{pane_active}\t#{session_attached}\t#{session_activity}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{@sc_agent}' \
         2>/dev/null \
         | awk -F'\t' -v p="^${SESSION_PREFIX}[|]" '$1 ~ p && $2=="1" && !seen[$1]++' \
         | sort -t$'\t' -k4 -nr || true
@@ -51,6 +59,76 @@ basename_of() {
     echo "${p##*/}"
 }
 
+roles() {
+    local d
+    for d in "$SC_AGENTS_DIR"/*/; do
+        [[ -f "${d}CLAUDE.md" ]] && basename "$d"
+    done 2>/dev/null
+}
+
+recent_projects() {
+    # Newest-first unique project dirs from Claude Code's prompt history,
+    # skipping role dirs, $HOME itself and dirs that no longer exist.
+    python3 - "$HOME/.claude/history.jsonl" "$SC_AGENTS_DIR" "$SC_RECENT_MAX" "$HOME" <<'PY' 2>/dev/null || true
+import json, os, sys
+hist, agents, maxn, home = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+seen = []
+try:
+    lines = open(hist, encoding="utf-8", errors="replace").read().splitlines()
+except OSError:
+    sys.exit(0)
+for line in reversed(lines):
+    try:
+        p = json.loads(line).get("project")
+    except ValueError:
+        continue
+    if not p or p in seen or p == home or p.startswith(agents + "/") or not os.path.isdir(p):
+        continue
+    seen.append(p)
+    if len(seen) >= maxn:
+        break
+print("\n".join(seen))
+PY
+}
+
+role_rows() {
+    local r a
+    for r in $(roles); do
+        a=""
+        [[ -f "$SC_AGENTS_DIR/$r/.sc" ]] && a="$(sed -n 's/^agent=//p' "$SC_AGENTS_DIR/$r/.sc" | tail -1 || true)"
+        printf ' a  %-28s  role%s\t__ROLE__%s\n' "$r" "${a:+ · $a}" "$r"
+    done
+}
+
+project_rows() {
+    local p
+    while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        printf ' p  %-28s  %s\t__DIR__%s\n' "$(basename_of "$p")" "${p/#$HOME/~}" "$p"
+    done <<< "$(recent_projects)"
+}
+
+act_on() {
+    case "$1" in
+        __NEW__)   exec superclaude "${AGENT_OPT[@]}" new ;;
+        __ROLE__*) exec superclaude "${AGENT_OPT[@]}" role "${1#__ROLE__}" ;;
+        __DIR__*)  exec superclaude "${AGENT_OPT[@]}" open "${1#__DIR__}" ;;
+        "")        exit 0 ;;
+        *)         attach_or_switch "$1" ;;
+    esac
+}
+
+fzf_pick() {
+    # $1 = prompt; stdin = rows "label<TAB>value"; prints value.
+    fzf --with-nth=1 --delimiter=$'\t' \
+        --no-info --no-scrollbar --reverse --height=100% \
+        --border=none --margin=0 --padding=0 \
+        --pointer='>' --prompt="$1" \
+        --header='● attached · a role · p project · enter:open · esc:cancel' \
+        --color='prompt:cyan,pointer:cyan,header:dim' \
+    | cut -f2
+}
+
 attach_nth() {
     local rows="$1" n="$2"
     local name
@@ -66,65 +144,73 @@ build_menu() {
     local rows="$1"
     printf ' +  new session in %s\t__NEW__\n' "$(basename_of "$PWD")"
     local i=0
-    while IFS=$'\t' read -r name pactive attached activity cmd cwd title; do
+    while IFS=$'\t' read -r name pactive attached activity cmd cwd title agent; do
         [[ -z "$name" ]] && continue
         i=$((i+1))
         local marker="·"
         [[ "$attached" != "0" ]] && marker="●"
         local rt; rt="$(reltime "$activity")"
         local label="$title"
-        [[ "$cmd" != "claude" ]] && label="[${cmd}] ${title}"
+        [[ -n "$agent" && "$agent" != "claude" ]] && label="[${agent}] ${title}"
+        [[ "$cmd" != "claude" && "$cmd" != "${agent:-claude}" ]] && label="[${cmd}] ${title}"
         local dir; dir="$(basename_of "$cwd")"
         printf '%2d %s %3s  %s  ·  %s\t%s\n' "$i" "$marker" "$rt" "$label" "$dir" "$name"
     done <<< "$rows"
+    role_rows
+    project_rows
 }
 
 picker() {
-    local rows="$1"
-    local picked
-    picked="$(build_menu "$rows" \
-        | fzf --with-nth=1 --delimiter=$'\t' \
-              --no-info --no-scrollbar --reverse --height=100% \
-              --border=none --margin=0 --padding=0 \
-              --pointer='>' --prompt='sc > ' \
-              --header='● attached · enter:attach · esc:cancel' \
-              --color='prompt:cyan,pointer:cyan,header:dim' \
-        | cut -f2)" || picked=""
-
-    [[ -z "$picked" ]] && exit 0
-    if [[ "$picked" == "__NEW__" ]]; then
-        exec superclaude new
-    fi
-    attach_or_switch "$picked"
+    local rows="$1" picked
+    picked="$(build_menu "$rows" | fzf_pick 'sc > ')" || picked=""
+    act_on "$picked"
 }
+
+if [[ "${1:-}" == "-a" || "${1:-}" == "--agent" ]]; then
+    AGENT_OPT=(-a "${2:?agent name}"); shift 2
+fi
 
 case "${1:-}" in
     n|new)
-        exec superclaude new
+        exec superclaude "${AGENT_OPT[@]}" new
+        ;;
+    a|agents|roles)
+        picked="$(role_rows | fzf_pick 'role > ')" || picked=""
+        act_on "$picked"
+        ;;
+    p|projects)
+        picked="$(project_rows | fzf_pick 'project > ')" || picked=""
+        act_on "$picked"
         ;;
     [0-9]*)
         rows="$(list_rows)"
         attach_nth "$rows" "$1"
         ;;
     -h|--help|help)
-        cat <<'EOF'
+        cat <<'HELP'
 sc - short superclaude session picker (fzf UI)
 
-  sc          fzf picker over all sc sessions ("new session" at top)
-  sc n        new session in $PWD
-  sc <N>      attach directly to N-th session (most-recent first)
-EOF
+  sc            picker: open sessions, then roles, then recent projects
+  sc n          new session in $PWD
+  sc <N>        attach directly to N-th session (most-recent first)
+  sc a          pick a role (agent)       roles live in $SC_AGENTS_DIR
+  sc p          pick a recent project     from ~/.claude/history.jsonl
+  sc ROLE       attach or create the role's session
+  sc DIR        attach or create the session of a directory
+  sc -a X ...   run harness X: claude (default), codex, opencode, vibe
+HELP
         ;;
     "")
         rows="$(list_rows)"
-        if [[ -z "$rows" ]]; then
-            echo "No sessions. Creating new in $PWD..."
-            exec superclaude new
-        fi
         picker "$rows"
         ;;
     *)
-        echo "unknown: $1 (try: sc, sc n, sc <N>)" >&2
+        if [[ -f "$SC_AGENTS_DIR/$1/CLAUDE.md" ]]; then
+            exec superclaude "${AGENT_OPT[@]}" role "$1"
+        elif [[ -d "$1" ]]; then
+            exec superclaude "${AGENT_OPT[@]}" open "$1"
+        fi
+        echo "unknown: $1 (try: sc, sc n, sc a, sc p, sc <N>, sc ROLE, sc DIR)" >&2
         exit 1
         ;;
 esac
