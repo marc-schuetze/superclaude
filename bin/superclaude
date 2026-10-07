@@ -20,7 +20,7 @@ agent_cmd() {
 CLAUDE_CMD="$(agent_cmd "$SC_AGENT")" || exit 1
 
 # Roles: one directory per specialist under $SC_AGENTS_DIR (a git repo synced
-# between machines). A role dir carries CLAUDE.md, .mcp.json, .claude/ and its
+# between machines). A role dir carries CLAUDE.md, mcp.json, .claude/ and its
 # own auto-memory, so `superclaude role home` is "Claude Code as the home
 # specialist" without any further choice at start.
 SC_AGENTS_DIR="${SC_AGENTS_DIR:-/x/agents}"
