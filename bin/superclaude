@@ -50,6 +50,9 @@ SELF="$HERE/bin/superclaude"
 
 tm() { tmux -L "$SC_TMUX_SOCKET" "$@"; }
 die() { echo "superclaude: $*" >&2; exit 1; }
+# Claude Code's dir name under ~/.claude/projects: every char outside A-Za-z0-9
+# becomes '-' (explicit set, a locale-aware range would keep umlauts)
+claude_proj() { echo "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${1//[^ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]/-}"; }
 
 # ---------- profiles ----------
 
@@ -74,11 +77,10 @@ conf_get() {
 }
 
 ensure_memory_link() {
-    # Claude Code keeps auto-memory in ~/.claude/projects/<encoded cwd>/memory
-    # (encoding: '/' and '.' become '-'). Point it at ROLE/memory so the memory
-    # lives in the synced profiles repo.
+    # Claude Code keeps auto-memory in ~/.claude/projects/<encoded cwd>/memory.
+    # Point it at ROLE/memory so the memory lives in the synced profiles repo.
     local dir="$1" proj
-    proj="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${dir//[\/.]/-}"
+    proj="$(claude_proj "$dir")"
     mkdir -p "$dir/memory" "$proj"
     if [[ -L "$proj/memory" ]]; then
         [[ "$(readlink -f "$proj/memory")" == "$(readlink -f "$dir/memory")" ]] \
@@ -297,7 +299,7 @@ delete_scratch() {
     read -rp "delete $dir and its Claude transcripts? y/N " ans
     [[ "$ans" == y ]] || return 0
     for s in $(sessions_where @sc_dir "$dir"); do tm kill-session -t "=$s"; done
-    rm -rf -- "$dir" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${dir//[\/.]/-}"
+    rm -rf -- "$dir" "$(claude_proj "$dir")"
     echo "deleted: $dir"
 }
 
@@ -350,7 +352,7 @@ project_rows() {
         done
     } | awk -F'\t' -v OFS='\t' '
         $1=="S" { e=$2; sub(/.*\//, "", e); n[e]++; t=int($3); if (t>last[e]) last[e]=t; next }
-        { e=$2; gsub(/[\/.]/, "-", e); name=$2; sub(/.*\//, "", name)
+        { e=$2; gsub(/[^A-Za-z0-9]/, "-", e); name=$2; sub(/.*\//, "", name)
           print last[e]+0, n[e]+0, name, $3, $2 }' | sort -t$'\t' -k1,1nr -k3,3
 }
 

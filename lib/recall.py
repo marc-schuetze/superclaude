@@ -19,7 +19,7 @@ def role_dir(argv):
     return Path(argv[2] if len(argv) > 2 else os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
 
 def transcript_dir(role):
-    enc = re.sub(r"[/.]", "-", str(role))
+    enc = re.sub(r"[^A-Za-z0-9]", "-", str(role))   # Claude Code's projects/ dir name
     return Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects" / enc
 
 def db(role):

@@ -1,5 +1,6 @@
 """Drive bin/superclaude against a private tmux server, a fake claude and a temp config."""
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -24,7 +25,7 @@ class EngineTests(unittest.TestCase):
         (prof / "home/CLAUDE.md").write_text("role\n")
         (prof / "home/mcp.json").write_text('{"mcpServers": {}}\n')
         self.code, self.tmp = root / "code", root / "scratch"
-        for d in (self.code / "foo", self.code / "foo-2", self.code / "a.b", self.tmp / "t1"):
+        for d in (self.code / "foo", self.code / "foo-2", self.code / "a.b", self.code / "x+y_z", self.tmp / "t1"):
             d.mkdir(parents=True)
         for c, agent in (("work", "view=work\n"), ("temp", "view=temp\nnew=what?\nscratch=yes\n")):
             (prof / "classes" / c).mkdir(parents=True)
@@ -64,7 +65,7 @@ class EngineTests(unittest.TestCase):
 
     def test_role_session_links_memory_and_refuses_a_foreign_link(self):
         self.sc("home")
-        proj = self.root / "claude/projects" / str(self.prof / "home").replace("/", "-").replace(".", "-")
+        proj = self.root / "claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.prof / "home"))
         self.assertEqual((proj / "memory").resolve(), (self.prof / "home/memory").resolve())
         (proj / "memory").unlink()
         (proj / "memory").symlink_to(self.root)
@@ -72,7 +73,7 @@ class EngineTests(unittest.TestCase):
         self.assertIn("points to", r.stderr)
 
     def test_existing_memory_is_moved_without_losing_a_clash(self):
-        proj = self.root / "claude/projects" / str(self.prof / "home").replace("/", "-").replace(".", "-")
+        proj = self.root / "claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.prof / "home"))
         (proj / "memory").mkdir(parents=True)
         (proj / "memory/a.md").write_text("from claude\n")
         (self.prof / "home/memory/a.md").write_text("from repo\n")
@@ -110,6 +111,14 @@ class EngineTests(unittest.TestCase):
                            capture_output=True, text=True, timeout=30)
         self.assertIn("started", r.stdout, r.stderr)
         self.assertEqual([s[1] for s in self.sessions()], [str(free)])
+
+    def test_project_rows_match_claude_dir_names(self):
+        # Claude names ~/.claude/projects/<dir> with every non-alphanumeric as '-'
+        enc = re.sub(r"[^A-Za-z0-9]", "-", str(self.code / "x+y_z"))
+        (self.root / "claude/projects" / enc).mkdir(parents=True)
+        (self.root / "claude/projects" / enc / "s.jsonl").write_text("{}\n")
+        row = [l for l in self.sc("_picklist", "work").stdout.splitlines() if l.endswith("/x+y_z")][0]
+        self.assertRegex(row, r"x\+y_z\s+work\s+1\t")
 
 
 if __name__ == "__main__":
