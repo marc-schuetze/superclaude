@@ -102,6 +102,15 @@ class EngineTests(unittest.TestCase):
         r = subprocess.run(["tmux", "-L", "from-config", "has-session"], capture_output=True)
         self.assertNotEqual(r.returncode, 0)
 
+    def test_unmapped_dir_and_empty_map_start_without_profile(self):
+        (self.prof / "classes/map").write_text("# nothing mapped\n")
+        free = self.root / "free"
+        free.mkdir()
+        r = subprocess.run([str(SC), "n"], cwd=free, env=self.env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=30)
+        self.assertIn("started", r.stdout, r.stderr)
+        self.assertEqual([s[1] for s in self.sessions()], [str(free)])
+
 
 if __name__ == "__main__":
     unittest.main()

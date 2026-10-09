@@ -210,6 +210,25 @@ class SyncScopeTests(unittest.TestCase):
         self.assertEqual(self.git("worktree", "list").count("\n"), 0)
         self.assertEqual(self.git("status", "--porcelain"), "")
 
+    def test_branch_moving_during_replay_is_not_reset_away(self):
+        self.write("home/memory/known.md", "here\n")
+        self.git("add", "home/memory/known.md")
+        self.git("commit", "-m", "sync: here")
+        self.other_clone_pushes("home/memory/there.md", "there\n")
+        wrapper_dir = self.root / "bin"
+        wrapper_dir.mkdir()
+        wrapper = wrapper_dir / "git"
+        # another session commits while the replay runs in the temp worktree
+        wrapper.write_text("#!/bin/sh\n"
+                           f"if [ \"$1\" = -C ] && [ \"$3\" = cherry-pick ]; then "
+                           f"{shlex.quote(self.real_git)} -C {shlex.quote(str(self.repo))} commit -q --allow-empty -m concurrent; fi\n"
+                           f"exec {shlex.quote(self.real_git)} \"$@\"\n")
+        wrapper.chmod(0o755)
+        self.env["PATH"] = str(wrapper_dir) + os.pathsep + self.env["PATH"]
+        self.sync()
+        self.assertEqual(self.git("log", "-1", "--format=%s"), "concurrent")
+        self.assertIn("moved", (self.repo / ".git/superclaude-sync-failed").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

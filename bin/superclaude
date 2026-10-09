@@ -101,7 +101,7 @@ is_class() { [[ -n "$1" && -d "$CLASSES/$1" ]]; }
 class_map() {
     # root<TAB>class per line, optionally only for class $1
     [[ -f "$CLASSES/map" ]] || return 0
-    grep -v '^\s*\(#\|$\)' "$CLASSES/map" | awk -F= -v c="${1:-}" -v OFS='\t' 'c=="" || $2==c {print $1, $2}'
+    { grep -v '^\s*\(#\|$\)' "$CLASSES/map" || true; } | awk -F= -v c="${1:-}" -v OFS='\t' 'c=="" || $2==c {print $1, $2}'
 }
 
 class_of() {
@@ -226,7 +226,7 @@ open_session() {
     # $1 key, $2 working dir, $3 profile dir (may be empty), $4 status label.
     # Always a new session; running ones are reached through the picker.
     local key="$1" dir="$2" conf="$3" label="$4" h cmd base name i=1
-    h="${HARNESS_EXPLICIT:-$([[ -n "$conf" ]] && conf_get "$conf" harness)}"
+    h="${HARNESS_EXPLICIT:-$([[ -z "$conf" ]] || conf_get "$conf" harness)}"
     h="${h:-$SC_HARNESS}"
     cmd="$(harness_cmd "$dir" "$conf" "$h")"
     if [[ -n "${INITIAL_PROMPT:-}" ]]; then

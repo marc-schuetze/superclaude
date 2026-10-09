@@ -73,7 +73,8 @@ fi
 same_branch || exit 0
 timeout 20 git fetch -q "$remote" "$target" >/dev/null 2>&1 || fail "fetch from $remote failed"
 same_branch || exit 0
-fetched="$(git rev-parse FETCH_HEAD)" || exit 0
+# the tracking ref, not FETCH_HEAD: a concurrent fetch may rewrite FETCH_HEAD
+fetched="$(git rev-parse --verify "$upstream_ref")" || exit 0
 head="$(git rev-parse "refs/heads/$branch")" || exit 0
 if git merge-base --is-ancestor "$head" "$fetched"; then
     git merge -q --ff-only "$fetched" >/dev/null 2>&1 || fail "fast-forward failed (local changes in the way?)"
@@ -95,6 +96,9 @@ elif ! git merge-base --is-ancestor "$fetched" "$head"; then
     git worktree remove --force "$tmp" >/dev/null 2>&1
     [[ -n "$new" ]] || fail "memory conflict with $remote: resolve by hand in $ROLES"
     same_branch || exit 0
+    # ponytail: a commit landing between this check and the reset is still lost
+    # from the branch (kept in the reflog); a real fix needs a ref transaction
+    [[ "$(git rev-parse "refs/heads/$branch")" == "$head" ]] || fail "branch moved during replay, retry: sc sync"
     git reset -q --keep "$new" >/dev/null 2>&1 || fail "replayed sync commits not applied (local changes in the way?)"
 fi
 same_branch || exit 0
