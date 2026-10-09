@@ -1,18 +1,13 @@
 #!/usr/bin/env bash
-# scd - `sc`, but on the desktop node over mosh.
-# Same UX as the local `sc` picker, except it runs on the desktop
-# (desktop.marc.zkm.de / zkm-gpu) so you pick from *its* sc sessions.
-#   scd        -> fzf picker over the desktop's sc sessions
-#   scd n      -> create a new session on the desktop
-#   scd <N>    -> attach the N-th desktop session (most-recent first)
-# Args are passed straight through to the remote `sc`.
+# scd — `sc` on another host over mosh: pick from *its* sessions, with mosh's
+# roaming/reconnect for flaky links. Args go straight to the remote `sc`.
+#   scd | scd n | scd <N> | scd NAME ...
+# Host: SCD_HOST=user@host, from the environment or ~/.config/superclaude/config.
 set -euo pipefail
-
-DEST="scharc@desktop.marc.zkm.de"
-
-# Mirror the interactive `mosh` wrapper: run mosh-server under the user's
-# systemd scope on the remote (cgroup-clean, survives shell teardown).
-exec mosh \
-    --server='systemd-run --user --scope --collect mosh-server' \
-    "$DEST" -- \
-    zsh -lc 'sc "$@"' sc "$@"
+conf="${SC_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/superclaude/config}"
+DEST="${SCD_HOST:-$( [[ -f "$conf" ]] && sed -n 's/^SCD_HOST=//p' "$conf" | tail -1 | tr -d '"' || true)}"
+[[ -n "$DEST" ]] || { echo "scd: set SCD_HOST=user@host in $conf" >&2; exit 1; }
+# mosh-server under the remote user's systemd scope: cgroup-clean, survives
+# shell teardown
+exec mosh --server='systemd-run --user --scope --collect mosh-server' \
+    "$DEST" -- zsh -lc 'sc "$@"' sc "$@"

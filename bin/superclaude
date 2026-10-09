@@ -1,191 +1,494 @@
 #!/usr/bin/env bash
-# superclaude - Claude Code with tmux session management
-# Inspired by agentbox session management
-
+# superclaude — Claude Code (or codex/opencode/vibe) in tmux sessions, with profiles.
+# sc, agent and ag are the same command.
+#
+#   sc                    picker: roles, running sessions, "+ here" ($PWD); tab cycles
+#                         the project views (view= per class), popup inside tmux
+#   sc n | sc new         new session in $PWD (profile from the map, or none)
+#   sc N                  attach the N-th running session (newest first)
+#   sc NAME [PROMPT]      new session for a role, class or project; PROMPT is the
+#                         first message. NAME: role | CLASS [PROJECT] | PROJECT | PATH
+#   sc new NAME [PROMPT]  same as sc NAME
+#   sc ls                 roles and running sessions
+#   sc kill NAME          kill a session by name, or every session of a role/project
+#   sc init ROLE          scaffold a role from templates/role
+#   sc recall ROLE Q      query the role's local memory index
+#   sc sync               commit/pull/push memory + notes of all roles
+#   sc -h HARNESS ...     claude (default) | codex | opencode | vibe
+#
+# Local setup lives outside the repo:
+#   ~/.config/superclaude/config  KEY=VALUE lines: SC_PROFILES, SC_TMUX_SOCKET,
+#                                 SC_HARNESS, SC_LEGACY_SOCKETS, SCD_HOST
+#   $SC_PROFILES/ROLE/            a role: CLAUDE.md, mcp.json, system.md, .agent,
+#                                 .claude/settings.json, memory/, notes/
+#   $SC_PROFILES/classes/CLASS/   a class: mcp.json, system.md, .agent, applied to a
+#                                 project repo; classes/map maps roots to classes
+#   $SC_PROFILES/templates/role/  overrides the repo's role template
+#   .agent keys                   harness= dirs= (roles) · view= new= scratch=yes (classes)
 set -euo pipefail
 
-CLAUDE_CMD="env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY claude --dangerously-skip-permissions"
-SESSION_PREFIX="sc"
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+SC_CONFIG="${SC_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/superclaude/config}"
 
-# Share Codeman's dedicated tmux socket so sessions created here are visible in
-# Codeman's web UI (and Codeman-created sessions are visible to `sc`). Codeman
-# runs `tmux -L codeman` by default; mirror its own socket resolution so we stay
-# aligned even under CODEMAN_INSTANCE. Precedence: SC_TMUX_SOCKET override wins,
-# else CODEMAN_TMUX_SOCKET, else codeman[-<CODEMAN_INSTANCE>].
-SC_TMUX_SOCKET="${SC_TMUX_SOCKET:-${CODEMAN_TMUX_SOCKET:-codeman${CODEMAN_INSTANCE:+-${CODEMAN_INSTANCE}}}}"
+# The config is data, not a script: only SC* keys, environment wins.
+if [[ -f "$SC_CONFIG" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^(SC[A-Z_]*)=(.*)$ ]] || continue
+        k="${BASH_REMATCH[1]}" v="${BASH_REMATCH[2]}"
+        [[ -n "${!k+x}" ]] && continue
+        v="${v#\"}"; v="${v%\"}"; v="${v/#\~/$HOME}"
+        export "$k=$v"
+    done < "$SC_CONFIG"
+fi
+export SC_PROFILES="${SC_PROFILES:-${XDG_CONFIG_HOME:-$HOME/.config}/superclaude/profiles}"
+SC_TMUX_SOCKET="${SC_TMUX_SOCKET:-superclaude}"
+SC_HARNESS="${SC_HARNESS:-claude}"
+SC_LEGACY_SOCKETS="${SC_LEGACY_SOCKETS:-}"   # older servers still listed in the picker
+PREFIX="sc"
+CLASSES="$SC_PROFILES/classes"
+SELF="$HERE/bin/superclaude"
 
-# All tmux calls go through the shared socket. (switch-client still respects the
-# current $TMUX when invoked from inside a session on this same socket.)
 tm() { tmux -L "$SC_TMUX_SOCKET" "$@"; }
+die() { echo "superclaude: $*" >&2; exit 1; }
 
-# --- helpers ---
+# ---------- profiles ----------
 
-attach_or_switch() {
-    # switch-client when inside tmux (e.g. invoked from display-popup),
-    # attach-session otherwise.
-    # NB: use `exec tmux -L …` directly, not the `tm` function — `exec` replaces
-    # the shell with an external command and cannot exec a shell function.
-    if [[ -n "${TMUX:-}" ]]; then
-        exec tmux -L "$SC_TMUX_SOCKET" switch-client -t "=$1"
-    else
-        exec tmux -L "$SC_TMUX_SOCKET" attach-session -t "=$1"
-    fi
+roles() {
+    local d
+    for d in "$SC_PROFILES"/*/; do
+        [[ -f "${d}CLAUDE.md" ]] && basename "$d"
+    done 2>/dev/null || true
 }
 
-slug() {
-    local path="${1:-$(pwd)}"
-    # tmux rewrites '.' and ':' to '_' in session names (they're reserved in
-    # target specs as window.pane / session:window separators). Mirror that so
-    # the name we create matches the name we later attach to.
-    path="${path//[.:]/_}"
-    echo "${SESSION_PREFIX}|${path}"
+is_role() { [[ -n "$1" && -f "$SC_PROFILES/$1/CLAUDE.md" ]]; }
+
+role_dir() {
+    is_role "$1" || die "no such role: $1 (have: $(roles | tr '\n' ' '))"
+    echo "$SC_PROFILES/$1"
 }
 
-list_sessions() {
-    local base_name
-    base_name="$(slug)"
-    tm list-sessions -F '#{session_name}' 2>/dev/null | grep -x "${base_name}\(-[0-9]\+\)\?" || true
+conf_get() {
+    # key=value lines in DIR/.agent; prints the value of $2 for dir $1
+    [[ -f "$1/.agent" ]] || return 0
+    sed -n "s/^$2=//p" "$1/.agent" | tail -1
 }
 
-next_session_name() {
-    local base_name
-    base_name="$(slug)"
-    local existing
-    existing="$(list_sessions)"
-
-    # If base session doesn't exist, use it
-    if ! echo "$existing" | grep -qx "$base_name"; then
-        echo "$base_name"
-        return
-    fi
-
-    # Find next available number
-    local i=2
-    while echo "$existing" | grep -qx "${base_name}-${i}"; do
-        ((i++))
-    done
-    echo "${base_name}-${i}"
-}
-
-usage() {
-    cat <<'EOF'
-superclaude - Claude Code with tmux session management
-
-Usage:
-  superclaude              Attach to existing session or create one
-  superclaude new          Create a new session (auto-numbered)
-  superclaude list         List sessions for current directory
-  superclaude list all     Interactive picker (fzf) over ALL sc sessions
-  superclaude attach NAME  Attach to a specific session
-  superclaude kill NAME    Kill a specific session
-  superclaude help         Show this help
-
-Any other arguments are passed directly to claude.
-EOF
-}
-
-pick_and_attach_all() {
-    # One row per session: first active pane (lowest window_index — base-index aware).
-    # pane_title carries Claude Code's conversation summary; pane_current_path is the
-    # real cwd (more accurate than parsing the -N suffix off the slug).
-    local rows
-    rows="$(tm list-panes -a \
-        -F $'#{session_name}\t#{pane_active}\t#{session_attached}\t#{session_activity}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}' \
-        2>/dev/null \
-        | awk -F'\t' -v p="^${SESSION_PREFIX}\\|" '$1 ~ p && $2=="1" && !seen[$1]++' \
-        | sort -t$'\t' -k4 -nr || true)"
-
-    if [[ -z "$rows" ]]; then
-        echo "No superclaude sessions running"
+ensure_memory_link() {
+    # Claude Code keeps auto-memory in ~/.claude/projects/<encoded cwd>/memory
+    # (encoding: '/' and '.' become '-'). Point it at ROLE/memory so the memory
+    # lives in the synced profiles repo.
+    local dir="$1" proj
+    proj="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${dir//[\/.]/-}"
+    mkdir -p "$dir/memory" "$proj"
+    if [[ -L "$proj/memory" ]]; then
+        [[ "$(readlink -f "$proj/memory")" == "$(readlink -f "$dir/memory")" ]] \
+            || die "$proj/memory points to $(readlink "$proj/memory"), not $dir/memory"
         return 0
     fi
-
-    if ! command -v fzf >/dev/null 2>&1; then
-        echo "fzf not installed; sessions:" >&2
-        echo "$rows" | cut -f1
-        return 1
+    if [[ -d "$proj/memory" ]]; then
+        # numbered backups: a name present on both sides keeps both copies
+        cp -a --backup=numbered "$proj/memory/." "$dir/memory/" \
+            || die "could not move $proj/memory into $dir/memory, left in place"
+        rm -rf "$proj/memory"
     fi
+    ln -s "$dir/memory" "$proj/memory"
+}
 
-    local selected=""
-    selected="$(
-        while IFS=$'\t' read -r name pactive attached activity cmd cwd title; do
-            local marker=" "
-            [[ "$attached" != "0" ]] && marker="●"
-            local ts
-            ts="$(date -d "@$activity" '+%m-%d %H:%M' 2>/dev/null || echo '-----')"
-            # If claude isn't the foreground process, mark the row so it's obvious.
-            local label="$title"
-            [[ "$cmd" != "claude" ]] && label="[${cmd}] ${title}"
-            printf '%s\t%s  %s  %-50.50s  %s\n' "$name" "$marker" "$ts" "$label" "$cwd"
-        done <<< "$rows" \
-        | fzf --with-nth=2.. --delimiter=$'\t' \
-              --prompt='session> ' --header='● attached   enter: attach   esc: cancel' \
-              --height=60% --reverse --no-multi \
-        | cut -f1
-    )" || selected=""
+# ---------- classes / projects ----------
 
-    if [[ -n "$selected" ]]; then
-        attach_or_switch "$selected"
+is_class() { [[ -n "$1" && -d "$CLASSES/$1" ]]; }
+
+class_map() {
+    # root<TAB>class per line, optionally only for class $1
+    [[ -f "$CLASSES/map" ]] || return 0
+    grep -v '^\s*\(#\|$\)' "$CLASSES/map" | awk -F= -v c="${1:-}" -v OFS='\t' 'c=="" || $2==c {print $1, $2}'
+}
+
+class_of() {
+    # class of the longest map root containing dir $1
+    class_map | awk -F'\t' -v d="$1" '(d==$1 || index(d, $1"/")==1) && length($1)>n {n=length($1); c=$2} END {print c}'
+}
+
+view_of() { local v; v="$(conf_get "$CLASSES/$1" view)"; echo "${v:-projects}"; }
+
+views() {
+    # picker views in tab order: roles, then each class view in map order
+    echo roles
+    class_map | cut -f2 | while read -r c; do view_of "$c"; done | awk '!seen[$0]++'
+}
+
+projects() {
+    local root
+    for root in $(class_map "${1:-}" | cut -f1); do
+        find "$root" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null || true
+    done | sort -u
+}
+
+find_project() {
+    # path or name (+ optional class) -> one absolute project dir
+    local name="$1" class="${2:-}" root m=()
+    if [[ "$name" == */* || "$name" == . ]]; then
+        [[ -d "$name" ]] || die "no such dir: $name"
+        readlink -f "$name"; return
+    fi
+    for root in $(class_map "$class" | cut -f1); do
+        [[ -d "$root/$name" ]] && m+=("$root/$name")
+        [[ "${root##*/}" == "$name" ]] && m+=("$root")   # a root is a project too
+    done
+    (( ${#m[@]} == 1 )) && { echo "${m[0]}"; return; }
+    (( ${#m[@]} == 0 )) && die "no role, class or project: $name${class:+ (class $class)}"
+    die "ambiguous project $name: ${m[*]} — name the class: sc CLASS $name"
+}
+
+new_project() {
+    # $1 class, $2 task -> creates and prints <first root of class>/<name>;
+    # haiku names it, the first words of the task are the fallback
+    local root name base i=2
+    root="$(class_map "$1" | head -1 | cut -f1)"
+    [[ -n "$root" ]] || die "class $1 has no root in $CLASSES/map"
+    echo "naming…" >&2
+    # no settings sources: user hooks/CLAUDE.md would make it answer the task
+    name="$(cd /tmp && env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY timeout 30 claude -p \
+        "Task: <task>$2</task> Print only a directory name for it." \
+        --system-prompt "You name directories. Reply with exactly one name for the task: 2-4 words, kebab-case, only a-z0-9-, no date. Never answer the task." \
+        --setting-sources "" --model haiku --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools "" \
+        </dev/null 2>/dev/null | head -1)" || true
+    name="$(tr '[:upper:]' '[:lower:]' <<<"$name" | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
+    [[ -n "$name" ]] || name="$(tr '[:upper:]' '[:lower:]' <<<"$2" | tr -cs 'a-z0-9' '-' | cut -d- -f1-4 | sed 's/^-*//; s/-*$//')"
+    [[ -n "$name" ]] || name="task"
+    base="$name"; while [[ -e "$root/$name" ]]; do name="$base-$i"; ((i++)); done
+    mkdir -p "$root/$name"
+    echo "$root/$name"
+}
+
+# ---------- harness ----------
+
+harness_cmd() {
+    # $1 working dir, $2 profile dir (role dir, class dir or empty), $3 harness
+    local dir="$1" conf="$2" h="$3"
+    case "$h" in
+        claude)
+            # The initial prompt goes right after `claude`: --add-dir and
+            # --mcp-config are variadic and would swallow a trailing positional.
+            # CLAUDE_CODE_SANDBOXED=1 makes Claude treat every directory as
+            # trusted (no folder-trust dialog); it only touches the trust checks.
+            local cmd="env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY CLAUDE_CODE_SANDBOXED=1 claude"
+            [[ -n "${INITIAL_PROMPT:-}" ]] && cmd="$cmd $(printf %q "$INITIAL_PROMPT")"
+            cmd="$cmd --dangerously-skip-permissions"
+            if [[ -n "$conf" ]]; then
+                # a profile gets exactly its own MCP servers, none without mcp.json
+                if [[ -f "$conf/mcp.json" ]]; then
+                    cmd="$cmd --mcp-config $(printf %q "$conf/mcp.json") --strict-mcp-config"
+                else
+                    cmd="$cmd --mcp-config '{\"mcpServers\":{}}' --strict-mcp-config"
+                fi
+                # system.md: appended to the system prompt (rules, not context)
+                [[ -f "$conf/system.md" ]] && cmd="$cmd --append-system-prompt-file $(printf %q "$conf/system.md")"
+                # dirs=/a,/b: extra working dirs (their CLAUDE.md load too).
+                # tmux runs the command string via sh, so quote paths.
+                local d IFS=','; for d in $(conf_get "$conf" dirs); do
+                    [[ -d "$d" ]] && cmd="$cmd --add-dir $(printf %q "$d")"
+                done
+            fi
+            # Projects keep their own .claude/; add only the status line.
+            [[ "$conf" != "$dir" ]] && cmd="$cmd --settings $(printf %q "$HERE/lib/project-settings.json")"
+            echo "$cmd" ;;
+        # codex: same kit via -c overrides (CLAUDE.md, system.md, mcp.json, dirs)
+        codex)    echo "codex --dangerously-bypass-approvals-and-sandbox $("$HERE/lib/codex_args.py" "$conf" "$dir")" ;;
+        opencode|vibe)
+            [[ -n "$conf" ]] && echo "superclaude: $h ignores the profile (mcp.json, system.md, dirs)" >&2
+            [[ "$h" == opencode ]] && echo "${SC_OPENCODE_CMD:-opencode --auto}" || echo "vibe --yolo --trust" ;;
+        *) die "unknown harness: $h (claude|codex|opencode|vibe)" ;;
+    esac
+}
+
+# ---------- sessions ----------
+# Identity is in session options (@sc_dir, @sc_key, @sc_harness), never parsed
+# from the name. The name only has to be unique: sc|<dir>, then -2, -3 ...
+
+sessions_where() {
+    # session names whose option $1 equals $2
+    tm list-sessions -F "#{$1}"$'\t#{session_name}' 2>/dev/null | awk -F'\t' -v v="$2" '$1==v {print $2}' || true
+}
+
+attach_or_switch() {
+    # $1 socket, $2 session. Inside a client of that server: switch. Inside
+    # another tmux server: nest an attach, switch-client cannot cross servers.
+    local sock="$1" name="$2"
+    if [[ -n "${TMUX:-}" && "${TMUX%%,*}" == "$(tmux -L "$sock" display-message -p '#{socket_path}' 2>/dev/null)" ]]; then
+        exec tmux -L "$sock" switch-client -t "=$name"
+    else
+        exec env -u TMUX tmux -L "$sock" attach-session -t "=$name"
     fi
 }
 
-create_and_attach() {
-    local session_name="$1"
-    tm new-session -d -s "$session_name" -c "$(pwd)" "$CLAUDE_CMD"
-    echo "Created session: $session_name"
-    attach_or_switch "$session_name"
+open_session() {
+    # $1 key, $2 working dir, $3 profile dir (may be empty), $4 status label.
+    # Always a new session; running ones are reached through the picker.
+    local key="$1" dir="$2" conf="$3" label="$4" h cmd base name i=1
+    h="${HARNESS_EXPLICIT:-$([[ -n "$conf" ]] && conf_get "$conf" harness)}"
+    h="${h:-$SC_HARNESS}"
+    cmd="$(harness_cmd "$dir" "$conf" "$h")"
+    if [[ -n "${INITIAL_PROMPT:-}" ]]; then
+        case "$h" in
+            claude) ;;   # already inside harness_cmd
+            codex)  cmd="$cmd $(printf %q "$INITIAL_PROMPT")" ;;
+            *) echo "superclaude: initial prompt not supported for $h, ignored" >&2 ;;
+        esac
+    fi
+    # roles keep memory in the synced role dir; projects use Claude's own
+    [[ "$h" == claude && -n "$conf" && "$conf" == "$dir" ]] && ensure_memory_link "$dir"
+    base="$PREFIX|${dir//[.:]/_}"; name="$base"   # tmux turns . and : into _
+    # new-session fails on a taken name: try the next suffix (no check-then-create race)
+    until tm new-session -d -s "$name" -c "$dir" -e "SC_LABEL=$label · $h" "$cmd" 2>/dev/null; do
+        tm has-session -t "=$name" 2>/dev/null || die "tmux could not start $name"
+        ((++i > 99)) && die "no free session name for $dir"
+        name="$base-$i"
+    done
+    tm set-option -t "=$name:" @sc_key "$key"
+    tm set-option -t "=$name:" @sc_dir "$dir"
+    tm set-option -t "=$name:" @sc_harness "$h"
+    tm rename-window -t "=$name:" "$key"
+    tm set-option -g set-titles on
+    tm set-option -g set-titles-string '#{@sc_key} · #{pane_title}'
+    echo "started $name ($h)"
+    attach_or_switch "$SC_TMUX_SOCKET" "$name"
 }
 
-# --- main ---
+open_any() {
+    # ROLE | CLASS [PROJECT] | PROJECT | PATH, then the prompt words
+    local n="${1:-}" class="" dir key
+    [[ -n "$n" ]] || die "usage: sc NAME [PROMPT...]"
+    shift
+    if is_role "$n"; then
+        dir="$(role_dir "$n")"
+        INITIAL_PROMPT="$*" open_session "$n" "$dir" "$dir" "ROLE $n"
+    fi
+    if is_class "$n"; then
+        class="$n"; n="${1:-}"; shift || true
+        # new=QUESTION in CLASS/.agent: ask for the task, create a named dir for
+        # it under the class root; an empty answer falls through to the picker
+        local q task; q="$(conf_get "$CLASSES/$class" new)"
+        if [[ -z "$n" && -n "$q" ]]; then
+            read -rep "$q " task
+            [[ -n "$task" ]] && { n="$(new_project "$class" "$task")"; set -- "$task"; }
+        fi
+        if [[ -z "$n" ]]; then
+            command -v fzf >/dev/null || die "usage: sc $class PROJECT [PROMPT...]"
+            n="$(projects "$class" | fzf --reverse --prompt="sc $class > ")" || exit 0
+        fi
+    fi
+    dir="$(find_project "$n" "$class")"
+    class="${class:-$(class_of "$dir")}"
+    key="$(basename "$dir")"
+    is_role "$key" && key="$key@${class:-dir}"   # keep role keys unambiguous
+    INITIAL_PROMPT="$*" open_session "$key" "$dir" "${class:+$CLASSES/$class}" "${class:+$class }$key"
+}
+
+delete_scratch() {
+    # $1 dir of a class with scratch=yes (not the root): kill its sessions,
+    # remove the dir and Claude's transcripts/memory for it
+    local dir="$1" class ans s
+    class="$(class_of "$dir")"
+    if [[ ! -d "$dir" || -z "$class" || "$(conf_get "$CLASSES/$class" scratch)" != yes ]] \
+        || class_map "$class" | cut -f1 | grep -qxF "$dir"; then
+        echo "superclaude: ctrl-d only deletes dirs of a scratch=yes class" >&2; sleep 1; return 0
+    fi
+    read -rp "delete $dir and its Claude transcripts? y/N " ans
+    [[ "$ans" == y ]] || return 0
+    for s in $(sessions_where @sc_dir "$dir"); do tm kill-session -t "=$s"; done
+    rm -rf -- "$dir" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${dir//[\/.]/-}"
+    echo "deleted: $dir"
+}
+
+# ---------- listing / picker ----------
+
+reltime() {
+    local diff=$(( $(date +%s) - ${1:-0} ))
+    if   (( diff < 60 ));     then echo "${diff}s"
+    elif (( diff < 3600 ));   then echo "$((diff/60))m"
+    elif (( diff < 86400 ));  then echo "$((diff/3600))h"
+    else echo "$((diff/86400))d"; fi
+}
+
+running() {
+    # running sessions, newest first: socket<TAB>activity<TAB>name<TAB>key<TAB>harness<TAB>attached<TAB>title-
+    # Empty fields print as "-": read with IFS=tab would collapse them.
+    # The legacy sockets are listed so their sessions stay reachable.
+    local sock
+    for sock in "$SC_TMUX_SOCKET" $SC_LEGACY_SOCKETS; do
+        tmux -L "$sock" list-sessions -F $'#{session_activity}\t#{session_name}\t#{?@sc_key,#{@sc_key},#{?@agent_role,#{@agent_role},-}}\t#{?@sc_harness,#{@sc_harness},#{?@agent_harness,#{@agent_harness},-}}\t#{session_attached}\t#{pane_title}-' 2>/dev/null \
+            | grep -P '^\d+\t(sc|ag)\|' | sed "s|^|$sock\t|" || true
+    done | sort -t$'\t' -k2,2nr
+}
+
+rows() {
+    # name<TAB>harness<TAB>state<TAB>age<TAB>topic<TAB>pick key
+    local r h sock t s k a title m
+    for r in $(roles); do
+        h="$(conf_get "$SC_PROFILES/$r" harness)"
+        printf '%s\t%s\t+\t-\tnew session\t%s\n' "$r" "${h:-$SC_HARNESS}" "$r"
+    done
+    while IFS=$'\t' read -r sock t s k h a title; do
+        m="·"; [[ "${a:-0}" =~ ^[1-9] ]] && m="●"
+        title="${title%-}"; [[ "$h" == - ]] && h=""
+        [[ "$k" != - ]] || { k="${s#*|}"; k="${k##*/}"; }
+        [[ "$sock" == "$SC_TMUX_SOCKET" ]] || k="$k [$sock]"
+        title="$(sed 's/^[^[:alnum:]]* *//' <<<"$title")"   # drop Claude's spinner glyph
+        printf '%s\t%s\t%s\t%s\t%s\tS:%s:%s\n' "$k" "${h:-?}" "$m" "$(reltime "$t")" "$title" "$sock" "$s"
+    done < <(running)
+}
+
+project_rows() {
+    # every project dir (roots included), newest Claude session first:
+    # last-use<TAB>sessions<TAB>name<TAB>class<TAB>path; never-used ones last
+    local root class
+    {
+        find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf 'S\t%h\t%T@\n' 2>/dev/null || true
+        class_map | while IFS=$'\t' read -r root class; do
+            find "$root" -maxdepth 1 -type d ! -name '.*' -printf "P\t%p\t$class\n" 2>/dev/null || true
+        done
+    } | awk -F'\t' -v OFS='\t' '
+        $1=="S" { e=$2; sub(/.*\//, "", e); n[e]++; t=int($3); if (t>last[e]) last[e]=t; next }
+        { e=$2; gsub(/[\/.]/, "-", e); name=$2; sub(/.*\//, "", name)
+          print last[e]+0, n[e]+0, name, $3, $2 }' | sort -t$'\t' -k1,1nr -k3,3
+}
+
+picklist() {
+    # fzf lines "display<TAB>key" for view $1; first line holds the column titles
+    local view="${1:-roles}" t c name class path m age dirs c2 skip=""
+    local -A cview cnew
+    if [[ "$view" == roles ]]; then
+        printf '%s %4s  %-24s %-8s %s\t\n' " " "age" "session / role" "harness" "topic"
+        printf '%s %4s  %-24s %-8s %s\t%s\n' "+" "-" "$(basename "$PWD")" "$SC_HARNESS" "new session here" "$PWD"
+        rows | awk -F'\t' '{printf "%s %4s  %-24s %-8s %s\t%s\n", $3, $4, $1, $2, $5, $6}'
+        return
+    fi
+    dirs="$(tm list-sessions -F '#{@sc_dir}' 2>/dev/null || true)"
+    printf '%s %4s  %-24s %-11s %3s\t\n' " " "age" "project" "class" "n"
+    # classes of this view with new=: first rows ask for a new task; their
+    # roots only hold the task dirs and are no project themselves
+    for c2 in $(class_map | cut -f2 | awk '!s[$0]++'); do
+        cview[$c2]="$(view_of "$c2")"; cnew[$c2]="$(conf_get "$CLASSES/$c2" new)"
+        [[ "${cview[$c2]}" == "$view" && -n "${cnew[$c2]}" ]] || continue
+        printf '%s %4s  %-24s %-11s %3s\t%s\n' "+" "-" "new task" "$c2" "" "$c2"
+        skip+="$(class_map "$c2" | cut -f1)"$'\n'
+    done
+    project_rows | while IFS=$'\t' read -r t c name class path; do
+        [[ "${cview[$class]}" == "$view" ]] || continue
+        grep -qxF -- "$path" <<<"$skip" && continue
+        m=" "; grep -qxF -- "$path" <<<"$dirs" && m="●"
+        age="-"; (( t > 0 )) && age="$(reltime "$t")"
+        printf '%s %4s  %-24s %-11s %3s\t%s\n' "$m" "$age" "$name" "$class" "$c" "$path"
+    done
+}
+
+view_action() {
+    # fzf transform for tab/shift-tab: $1 next|prev|NAME, current view from $FZF_PROMPT
+    local -a v; mapfile -t v < <(views)
+    local cur="${FZF_PROMPT:-}" i n=${#v[@]} to="$1"
+    cur="${cur% > }"
+    if [[ "$to" == next || "$to" == prev ]]; then
+        for ((i = 0; i < n; i++)); do [[ "${v[i]}" == "$cur" ]] && break; done
+        (( i < n )) || i=0
+        [[ "$to" == next ]] && to="${v[(i + 1) % n]}" || to="${v[(i + n - 1) % n]}"
+    fi
+    printf 'reload(%q _picklist %q)+change-prompt(%s > )+change-border-label( %s )+first' "$SELF" "$to" "$to" "$to"
+}
+
+picker() {
+    command -v fzf >/dev/null || { rows | cut -f1-5 | column -t -s$'\t'; return; }
+    # needs fzf >= 0.45 (transform). Inside tmux: popup, unless already in one (sc.tmux).
+    local out key picked view="${SC_VIEW:-roles}" pop=()
+    [[ -n "${TMUX:-}" && -z "${SC_POPUP:-}" ]] && pop=(--tmux=center,90%,80%)
+    out="$(picklist "$view" \
+        | fzf --with-nth=1 --delimiter=$'\t' --header-lines=1 --no-info --no-scrollbar --reverse \
+              --height=100% "${pop[@]}" --border=rounded --border-label=" $view " \
+              --pointer='>' --gutter=' ' --prompt="$view > " \
+              --footer='+ new · ● running · enter: open · ctrl-n: another session · ctrl-x: codex session · ctrl-d: delete scratch dir · tab/shift-tab: views · esc' \
+              --expect=ctrl-n,ctrl-x,ctrl-d \
+              --bind "tab:transform:$(printf %q "$SELF") _view next" \
+              --bind "btab:transform:$(printf %q "$SELF") _view prev" \
+              --color='prompt:cyan,pointer:cyan,header:bold,footer:dim,border:dim,label:cyan' \
+        )" || true   # esc: empty; never let a pipeline status eat the pick
+    # --expect: line 1 is the key pressed (empty for enter), line 2 the item
+    key="$(sed -n 1p <<<"$out")"; picked="$(sed -n 2p <<<"$out" | cut -f2)"
+    [[ -z "$picked" ]] && return
+    if [[ "$key" == ctrl-d ]]; then
+        delete_scratch "$picked"
+        SC_VIEW="$(view_of "$(class_of "$picked")")" exec "$SELF"
+    fi
+    if [[ "$picked" == S:* ]]; then
+        local rest="${picked#S:}" sock sess k
+        sock="${rest%%:*}"; sess="${rest#*:}"
+        [[ -n "$key" ]] || attach_or_switch "$sock" "$sess"
+        # a new session next to a running one: role by key, project by its dir
+        k="$(tmux -L "$sock" display-message -p -t "=$sess:" '#{?@sc_key,#{@sc_key},#{@agent_role}}' 2>/dev/null || true)"
+        if is_role "$k"; then picked="$k"
+        else picked="$(tmux -L "$sock" display-message -p -t "=$sess:" '#{?@sc_dir,#{@sc_dir},#{?@agent_dir,#{@agent_dir},#{pane_current_path}}}' 2>/dev/null || true)"; fi
+        [[ -n "$picked" ]] || die "no role/dir recorded for $sess"
+    fi
+    [[ "$key" == ctrl-x ]] && HARNESS_EXPLICIT=codex
+    open_any "$picked"
+}
+
+attach_nth() {
+    local line
+    line="$(running | sed -n "${1}p")"
+    [[ -n "$line" ]] || die "no session #$1"
+    attach_or_switch "$(cut -f1 <<<"$line")" "$(cut -f3 <<<"$line")"
+}
+
+# ---------- scaffolding ----------
+
+init_role() {
+    local role="$1" dir="$SC_PROFILES/$1" tpl="$SC_PROFILES/templates/role"
+    [[ "$role" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "role name: lowercase letters, digits, - and _"
+    [[ -e "$dir" ]] && die "exists: $dir"
+    [[ -d "$tpl" ]] || tpl="$HERE/templates/role"
+    mkdir -p "$dir"
+    cp -a "$tpl/." "$dir/"
+    sed -i "s/@ROLE@/$role/g" "$dir/CLAUDE.md"
+    mkdir -p "$dir/memory" "$dir/notes"
+    touch "$dir/memory/.gitkeep" "$dir/notes/.gitkeep"
+    echo "created $dir — edit CLAUDE.md and mcp.json, then: sc $role"
+}
+
+# ---------- main ----------
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--harness" ]]; then
+    HARNESS_EXPLICIT="${2:?harness}"; shift 2
+fi
 
 case "${1:-}" in
-    "")
-        # No args: attach to existing session or create one
-        existing="$(list_sessions | head -1)"
-        if [[ -n "$existing" ]]; then
-            echo "Attaching to: $existing"
-            attach_or_switch "$existing"
-        else
-            create_and_attach "$(slug)"
-        fi
-        ;;
-    new)
-        session_name="$(next_session_name)"
-        create_and_attach "$session_name"
-        ;;
-    list)
-        if [[ "${2:-}" == "all" ]]; then
-            pick_and_attach_all
-        else
-            sessions="$(list_sessions)"
-            if [[ -z "$sessions" ]]; then
-                echo "No sessions for $(pwd)"
-            else
-                echo "Sessions for $(pwd):"
-                echo "$sessions"
-            fi
-        fi
-        ;;
-    attach)
-        if [[ -z "${2:-}" ]]; then
-            echo "Usage: superclaude attach SESSION_NAME"
-            exit 1
-        fi
-        attach_or_switch "$2"
-        ;;
-    kill)
-        if [[ -z "${2:-}" ]]; then
-            echo "Usage: superclaude kill SESSION_NAME"
-            exit 1
-        fi
-        tm kill-session -t "=$2"
-        echo "Killed session: $2"
-        ;;
-    help|--help|-h)
-        usage
-        ;;
-    *)
-        # Pass everything through to claude
-        exec $CLAUDE_CMD "$@"
-        ;;
+    "")        picker ;;
+    n|new)     shift; if [[ -n "${1:-}" ]]; then open_any "$@"; else open_any "$PWD"; fi ;;
+    ls|list)   rows | cut -f1-5 | column -t -s$'\t' ;;
+    roles)     roles ;;
+    classes)   [[ -d "$CLASSES" ]] && find "$CLASSES" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort ;;
+    kill)      [[ -n "${2:-}" ]] || die "usage: sc kill NAME"
+               if tm has-session -t "=$2" 2>/dev/null; then tm kill-session -t "=$2" && echo "killed $2"
+               else for s in $(sessions_where @sc_key "$2"); do tm kill-session -t "=$s" && echo "killed $s"; done; fi ;;
+    init)      [[ -n "${2:-}" ]] || die "usage: sc init ROLE"; init_role "$2" ;;
+    recall)    [[ -n "${2:-}" && -n "${3:-}" ]] || die "usage: sc recall ROLE QUERY..."
+               d="$(role_dir "$2")"; shift 2
+               printf '{"prompt": %s}' "$(python3 -c 'import json,sys; print(json.dumps(" ".join(sys.argv[1:])))' "$@")" \
+                 | "$HERE/lib/recall.py" query "$d" | python3 -c 'import json,sys; d=sys.stdin.read().strip(); print(json.loads(d)["hookSpecificOutput"]["additionalContext"] if d else "(no hits)")' ;;
+    sync)      exec "$HERE/lib/sync.sh" ;;
+    help|--help) sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+    # internal: hooks in profiles call these through `agent`, keep the names stable
+    _projects) projects "${2:-}" ;;
+    _picklist) picklist "${2:-roles}" ;;
+    _view)     view_action "${2:-next}" ;;
+    _recall)   exec "$HERE/lib/recall.py" query "${2:-$PWD}" ;;
+    _status)   # statusLine hook: label, sync failure flag, then the user's own status line
+               input="$(cat)"; d="${2:-$PWD}"
+               h="$(conf_get "$d" harness)"; h="${h:-$SC_HARNESS}"
+               printf '\033[1;35m▌%s\033[0m' "${SC_LABEL:-${AGENT_LABEL:-ROLE $(basename "$d") · $h}}"
+               [[ -f "$SC_PROFILES/.git/superclaude-sync-failed" ]] && printf ' \033[1;31msync failed: sc sync\033[0m'
+               g="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline.sh"
+               [[ -x "$g" ]] && printf ' · %s' "$(printf '%s' "$input" | "$g")"
+               echo ;;
+    [0-9]*)    [[ "$1" =~ ^[0-9]+$ ]] && attach_nth "$1" || open_any "$@" ;;
+    *)         open_any "$@" ;;
 esac

@@ -9,7 +9,7 @@
 #     run-shell /path/to/superclaude/sc.tmux
 #
 # TPM install — add to ~/.tmux.conf:
-#     set -g @plugin 'scharc/superclaude'
+#     set -g @plugin 'marc-schuetze/superclaude'
 #
 # Then use `sc-popup` anywhere a tmux command is expected:
 #     bind-key C-s sc-popup
@@ -40,7 +40,8 @@ W="$(opt '@sc-popup-width'  '90%')"
 H="$(opt '@sc-popup-height' '90%')"
 KEY="$(opt '@sc-key' '')"
 
-tmux set-option -sa command-alias "sc-popup=display-popup -E -w $W -h $H \"$SC_BIN\""
+# SC_POPUP: the picker is already in a popup, so fzf must not open its own
+tmux set-option -sa command-alias "sc-popup=display-popup -E -w $W -h $H -e SC_POPUP=1 \"$SC_BIN\""
 
 if [[ -n "$KEY" ]]; then
     tmux bind-key "$KEY" sc-popup

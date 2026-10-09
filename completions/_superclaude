@@ -1,0 +1,17 @@
+#compdef superclaude sc agent ag
+# zsh completion: subcommands, roles, classes, projects, -h harness.
+local -a subs names harn
+subs=('new:new session (in $PWD without NAME)' 'ls:roles and sessions' 'kill:kill a session' 'init:scaffold a role' 'recall:query local memory' 'sync:commit/pull/push memories')
+harn=(claude codex opencode vibe)
+if [[ "${words[CURRENT-1]}" == "-h" || "${words[CURRENT-1]}" == "--harness" ]]; then
+  _describe -t harness 'harness' harn; return
+fi
+local prev="${words[CURRENT-1]}"
+if (( CURRENT == 2 )) || [[ "$prev" == new || "$prev" == n || "$prev" == kill ]]; then
+  names=(${(f)"$(superclaude roles)"}); _describe -t roles 'role' names
+  names=(${(f)"$(superclaude classes)"}); _describe -t classes 'class' names
+  names=(${(f)"$(superclaude _projects)"}); _describe -t projects 'project' names
+  (( CURRENT == 2 )) && _describe -t subcommands 'command' subs
+elif superclaude classes | grep -qx -- "$prev"; then
+  names=(${(f)"$(superclaude _projects "$prev")"}); _describe -t projects 'project' names
+fi

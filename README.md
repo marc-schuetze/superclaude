@@ -1,83 +1,141 @@
 # superclaude
 
-Claude Code with tmux session management. One sticky session per project,
-plus a touch-friendly picker that drops into a tmux popup so you can
-switch sessions from a phone without chording `prefix` keys.
+Claude Code in tmux sessions, plus the helpers around it: a touch-friendly
+picker, profiles that give a session its own context, MCP servers and memory,
+and a remote picker over mosh.
 
-Three scripts:
+The repo is the generic base. Everything personal lives outside it, under
+`~/.config/superclaude/`.
 
-- **`superclaude`** — full CLI: create / list / attach / kill named tmux sessions running `claude`. Session names are derived from `$PWD` so each project gets its own sticky session. `superclaude list all` opens an `fzf` picker over every session.
-- **`sc`** — short, mobile-friendly wrapper around the same session pool. `sc` opens an `fzf` picker filling the screen, with "+ new session" pinned at the top. `sc n` creates new, `sc <N>` attaches by row index. Pairs with [`sc.tmux`](#tmux-integration) for one-tap session switching from inside tmux.
-- **`scd`** — `sc`, but on the desktop node over `mosh`. Runs the remote `sc` on `desktop.marc.zkm.de` so you pick from *its* session pool, with mosh's roaming/reconnect for flaky links. Same arg surface as `sc` (`scd`, `scd n`, `scd <N>`). Client-side only — install it wherever you *initiate* from (laptop/phone), not on the desktop itself.
+## Layers
 
-## Install
+1. **Session.** A harness (claude, codex, opencode, vibe) runs in a tmux session
+   on one server (`tmux -L superclaude`). The session is named `sc|<dir>[-N]`;
+   its identity is stored in session options (`@sc_dir`, `@sc_key`,
+   `@sc_harness`), so names only have to be unique.
+2. **Profile.** A directory with optional parts, applied when a session starts:
 
-```sh
-git clone git@github.com:marc-schuetze/superclaude.git
-ln -s "$PWD/superclaude/bin/superclaude" ~/.local/bin/superclaude
-ln -s "$PWD/superclaude/bin/sc"          ~/.local/bin/sc
-ln -s "$PWD/superclaude/bin/scd"         ~/.local/bin/scd   # optional: remote-to-desktop
-```
+        CLAUDE.md               who it is (roles only; projects bring their own)
+        mcp.json                its MCP servers; a profile gets exactly these, none without the file
+        system.md               appended to the system prompt (rules, not context)
+        .agent                  key=value: harness= dirs= view= new= scratch=yes
+        .claude/settings.json   hooks: recall before each prompt, sync on exit, status line
 
-Requires `tmux`, `fzf`, and `claude` (Claude Code CLI) on `$PATH`.
+   A **role** is a profile that is also the working directory: it has a home,
+   `memory/` (Claude Code's auto-memory, symlinked in) and `notes/`.
+   A **class** is a profile without a home, applied to a project repo; the
+   session runs inside the repo with the repo's own CLAUDE.md and memory.
+   `classes/map` maps project roots to classes.
+3. **Helpers.** Picker with views, local memory index (`recall`), git sync of
+   role memory, scratch dirs named by haiku, `scd` (picker on another host),
+   `sc.tmux` (picker as tmux popup).
 
 ## Usage
 
-```
-superclaude              attach existing session for $PWD, or create one
-superclaude new          new session in $PWD (auto-numbered if one exists)
-superclaude list         list sessions for $PWD
-superclaude list all     fzf picker over ALL sc sessions
-superclaude attach NAME  attach to a specific session
-superclaude kill NAME    kill a specific session
+`superclaude`, `sc`, `agent` and `ag` are the same command.
 
-sc                       fzf picker over ALL sc sessions, "+ new" at top
-sc n                     new session in $PWD
-sc <N>                   attach to row N (most-recent first)
+    sc                    picker: roles, running sessions, "+ here"; tab cycles the views
+    sc n                  new session in $PWD (profile from the map, or none)
+    sc 3                  attach the 3rd running session (newest first)
+    sc home               new session for the role home
+    sc home "check the backups"   same, with a first message
+    sc myproject          session in a project found under a map root, class from the map
+    sc web myproject      explicit class (needed when a name exists under two roots)
+    sc web                picker over that class's projects
+    sc temp               class with new=: asks for the task, creates a haiku-named dir
+    sc ~/some/dir         any dir; class from the map if it lies under a root
+    sc -h codex home      run codex instead of claude for this session
+    sc ls                 roles, then running sessions (with Claude's topic)
+    sc kill home          kill every session of a role or project (or one by name)
+    sc init home          scaffold a role from templates/role
+    sc recall home "pihole vip"   query the role's local memory
+    sc sync               commit/pull/push memory + notes of all roles
 
-scd                      sc picker on the desktop node (over mosh)
-scd n                    new session on the desktop
-scd <N>                  attach the desktop's row N
-```
+    scd [args]            the same picker on SCD_HOST, over mosh
 
-The picker shows `idx ●/· age  title  ·  dir` per row — `●` = attached, `·` = idle.
+Picker keys: enter opens (a role or project starts a new session, a running
+session attaches), ctrl-n starts another session next to the selected one,
+ctrl-x starts a codex session, ctrl-d deletes a dir of a `scratch=yes` class
+together with its Claude transcripts, tab/shift-tab switch views.
+
+## Local setup: ~/.config/superclaude/
+
+    config                       KEY=VALUE lines (data, not sourced; the environment wins)
+    profiles/                    default $SC_PROFILES, often a git repo shared between machines
+      <role>/                    a role
+      classes/<class>/           a class
+      classes/map                /path/to/root=class, one per line
+      templates/role/            overrides the repo's templates/role for `sc init`
+
+`config` keys:
+
+| key | default | meaning |
+|---|---|---|
+| `SC_PROFILES` | `~/.config/superclaude/profiles` | roles, classes, map, templates |
+| `SC_TMUX_SOCKET` | `superclaude` | the tmux server; `codeman` shares [Codeman](https://github.com/marc-schuetze/codeman-superclaude)'s |
+| `SC_HARNESS` | `claude` | default harness |
+| `SC_LEGACY_SOCKETS` | empty | other tmux servers whose `sc\|`/`ag\|` sessions the picker still lists |
+| `SCD_HOST` | empty | `user@host` for `scd` |
+
+Class keys in `classes/<class>/.agent`:
+
+- `view=NAME`: the picker tab the class's projects appear in (default `projects`).
+  Tabs follow the order of `classes/map`.
+- `new=QUESTION`: `sc <class>` asks this, names a new dir under the class root
+  and starts there; the view gets a "+ new task" row.
+- `scratch=yes`: its dirs may be deleted with ctrl-d.
+
+Example:
+
+    # ~/.config/superclaude/config
+    SC_PROFILES=~/agents
+    SCD_HOST=me@desktop.example.org
+
+    # ~/agents/classes/map
+    /home/me/code/work=work
+    /home/me/code/own=own
+    /tmp/tasks=temp
+
+    # ~/agents/classes/temp/.agent
+    view=temp
+    new=what are we doing?
+    scratch=yes
+
+## Memory
+
+Two layers per role. `memory/` is Claude Code's own auto-memory (loaded every
+session), kept in the profiles repo through a symlink
+`~/.claude/projects/<encoded>/memory -> <role>/memory`. An existing memory dir
+there is moved in first; a name present on both sides keeps both copies.
+`lib/recall.py` adds a local SQLite FTS5 index over `memory/`, `notes/` and the
+role's transcripts; as a `UserPromptSubmit` hook it injects up to three matching
+snippets. The index (`.recall.sqlite`) is derived data, per machine, gitignored.
+
+`sc sync` (also the `SessionEnd` hook) commits only `memory/` and `notes/`,
+fetches, replays its own commits when both machines moved, and pushes. It never
+publishes other local changes. A failure is written to
+`.git/superclaude-sync-failed` and shown in the status line.
+
+The hooks in role settings call `agent _recall`, `agent _status` and
+`agent sync`; these names stay stable.
 
 ## tmux integration
 
-Open the `sc` picker as a tmux popup, with the absolute path resolved at
-load-time so it works even if `sc` isn't on the tmux server's `$PATH`.
+    run-shell '/path/to/superclaude/sc.tmux'
+    bind-key C-s sc-popup
 
-Add one line to `~/.tmux.conf`:
+or with TPM: `set -g @plugin 'marc-schuetze/superclaude'`. Options, set before
+the `run-shell` line: `@sc-key`, `@sc-popup-width`, `@sc-popup-height` (90%).
 
-```tmux
-run-shell '/path/to/superclaude/sc.tmux'
-```
+## Install
 
-Or via [TPM](https://github.com/tmux-plugins/tpm):
+    git clone https://github.com/marc-schuetze/superclaude.git
+    export PATH="$PWD/superclaude/bin:$PATH"
+    ln -s "$PWD/superclaude/completions/_superclaude" ~/.zsh/completions/_superclaude
 
-```tmux
-set -g @plugin 'scharc/superclaude'
-```
+Needs tmux, fzf >= 0.45, python3 (sqlite3 with FTS5), git, and the harness CLIs;
+`scd` needs mosh. Claude is started with `--dangerously-skip-permissions` and
+`CLAUDE_CODE_SANDBOXED=1` (no folder-trust dialog). MCP secrets belong in your
+environment, never in the profiles repo.
 
-This registers a `sc-popup` command-alias. Use it anywhere a tmux command
-is expected:
-
-```tmux
-bind-key C-s sc-popup
-
-# or from a display-menu:
-bind-key -n F1 display-menu 'Sessions' s sc-popup ...
-```
-
-Optional config (set before the `run-shell` line):
-
-```tmux
-set -g @sc-key 'C-s'        # also auto-bind a key
-set -g @sc-popup-width  90% # popup size (default 90%)
-set -g @sc-popup-height 90%
-```
-
-## Notes
-
-- Sessions are launched with `claude --dangerously-skip-permissions`. Edit `CLAUDE_CMD` in `bin/superclaude` if you want different defaults.
-- Session-name slug: `sc|<absolute-path>`. Multiple sessions for the same path get suffixed `-2`, `-3`, ...
+Tests: `python3 -m unittest discover tests`.
