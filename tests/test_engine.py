@@ -33,7 +33,9 @@ class EngineTests(unittest.TestCase):
         (prof / "classes/map").write_text(f"# comment\n{self.code}=work\n{self.tmp}=temp\n")
         conf = root / "config"
         conf.write_text(f'SC_PROFILES="{prof}"\nSC_TMUX_SOCKET=from-config\nSC_HARNESS=claude\nIGNORED=1\n')
-        self.env = dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}", SC_CONFIG=str(conf),
+        # SC_* from a running sc session would beat the test config
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SC")}
+        self.env = dict(env, PATH=f"{fake}:{os.environ['PATH']}", SC_CONFIG=str(conf),
                         SC_TMUX_SOCKET=self.sock, CLAUDE_CONFIG_DIR=str(root / "claude"))
         self.env.pop("TMUX", None)
 
@@ -119,6 +121,18 @@ class EngineTests(unittest.TestCase):
         (self.root / "claude/projects" / enc / "s.jsonl").write_text("{}\n")
         row = [l for l in self.sc("_picklist", "work").stdout.splitlines() if l.endswith("/x+y_z")][0]
         self.assertRegex(row, r"x\+y_z\s+work\s+1\t")
+
+    def test_picker_refuses_an_old_fzf(self):
+        fzf = self.root / "bin/fzf"
+        fzf.write_text("#!/bin/sh\necho '0.44.1 (debian)'\n")
+        fzf.chmod(0o755)
+        r = self.sc()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("fzf 0.44.1 too old, need >= ", r.stderr)
+
+    def test_readme_states_the_fzf_minimum(self):
+        fzf_min = re.search(r"^FZF_MIN=(\S+)", SC.read_text(), re.M)[1]
+        self.assertIn(f"fzf >= {fzf_min}", (SC.parents[1] / "README.md").read_text())
 
 
 if __name__ == "__main__":

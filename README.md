@@ -133,7 +133,7 @@ the `run-shell` line: `@sc-key`, `@sc-popup-width`, `@sc-popup-height` (90%).
     export PATH="$PWD/superclaude/bin:$PATH"
     ln -s "$PWD/superclaude/completions/_superclaude" ~/.zsh/completions/_superclaude
 
-Needs tmux, fzf >= 0.45, python3 (sqlite3 with FTS5), git, and the harness CLIs;
+Needs tmux, fzf >= 0.65, python3 (sqlite3 with FTS5), git, and the harness CLIs;
 `scd` needs mosh. Claude is started with `--dangerously-skip-permissions` and
 `CLAUDE_CODE_SANDBOXED=1` (no folder-trust dialog). MCP secrets belong in your
 environment, never in the profiles repo.

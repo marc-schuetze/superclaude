@@ -45,6 +45,7 @@ SC_TMUX_SOCKET="${SC_TMUX_SOCKET:-superclaude}"
 SC_HARNESS="${SC_HARNESS:-claude}"
 SC_LEGACY_SOCKETS="${SC_LEGACY_SOCKETS:-}"   # older servers still listed in the picker
 PREFIX="sc"
+FZF_MIN=0.65   # --gutter; --footer needs 0.63, --tmux 0.53. README states the same.
 CLASSES="$SC_PROFILES/classes"
 SELF="$HERE/bin/superclaude"
 
@@ -400,7 +401,10 @@ view_action() {
 
 picker() {
     command -v fzf >/dev/null || { rows | cut -f1-5 | column -t -s$'\t'; return; }
-    # needs fzf >= 0.45 (transform). Inside tmux: popup, unless already in one (sc.tmux).
+    # Inside tmux: popup, unless already in one (sc.tmux).
+    local fv; fv="$(fzf --version | cut -d' ' -f1)"
+    [[ "$(printf '%s\n' "$FZF_MIN" "$fv" | sort -V | head -1)" == "$FZF_MIN" ]] \
+        || { echo "superclaude: fzf $fv too old, need >= $FZF_MIN ($(command -v fzf))" >&2; return 1; }
     local out key picked view="${SC_VIEW:-roles}" pop=()
     [[ -n "${TMUX:-}" && -z "${SC_POPUP:-}" ]] && pop=(--tmux=center,90%,80%)
     out="$(picklist "$view" \
