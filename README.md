@@ -83,6 +83,7 @@ Class keys in `classes/<class>/.agent`:
   Tabs follow the order of `classes/map`.
 - `new=QUESTION`: `sc <class>` asks this, names a new dir under the class root
   and starts there; the view gets a "+ new task" row.
+- `git=yes`: a dir made by `new=` starts as a git repo (`git init`).
 - `scratch=yes`: its dirs may be deleted with ctrl-d.
 
 Example:

@@ -18,7 +18,7 @@ class EngineTests(unittest.TestCase):
         self.addCleanup(subprocess.run, ["tmux", "-L", self.sock, "kill-server"], capture_output=True)
         fake = root / "bin"
         fake.mkdir()
-        (fake / "claude").write_text("#!/bin/sh\nexec sleep 300\n")
+        (fake / "claude").write_text('#!/bin/sh\n[ "$1" = -p ] && { echo my-proj; exit; }\nexec sleep 300\n')
         (fake / "claude").chmod(0o755)
         prof = self.prof = root / "profiles"
         (prof / "home/memory").mkdir(parents=True)
@@ -82,6 +82,13 @@ class EngineTests(unittest.TestCase):
         self.sc("home")
         texts = sorted(p.read_text() for p in (self.prof / "home/memory").iterdir())
         self.assertEqual(texts, ["from claude\n", "from repo\n"])
+
+    def test_new_task_dir_is_named_and_git_init_on_git_yes(self):
+        (self.prof / "classes/temp/.agent").write_text("view=temp\nnew=what?\ngit=yes\n")
+        r = subprocess.run([str(SC), "temp"], env=self.env, input="build a thing\n",
+                           capture_output=True, text=True, timeout=30)
+        self.assertTrue((self.tmp / "my-proj/.git").is_dir(), r.stderr)
+        self.assertEqual([s[1] for s in self.sessions()], [str(self.tmp / "my-proj")])
 
     def test_views_from_classes(self):
         self.assertEqual(self.sc("_view", "next").stdout.count("reload("), 1)
