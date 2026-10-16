@@ -58,7 +58,20 @@ only_sync_commits "$upstream" "$head" || fail "local commits outside memory/ and
 same_branch || exit 0
 
 scope=(':(glob)*/memory/**' ':(glob)*/notes/**')
-mapfile -d '' -t sync_paths < <(git ls-files -z --cached --others --exclude-standard -- "${scope[@]}")
+# memory/ and notes/ hold text a role writes, not data: new binary or large
+# files stay out and are reported, a bulk drop of new files stops the sync.
+# Data belongs in /x/temp or a project dir.
+mapfile -d '' -t new_paths < <(git ls-files -z --others --exclude-standard -- "${scope[@]}")
+(( ${#new_paths[@]} <= 100 )) || fail "${#new_paths[@]} new files in memory/notes, move data out of the roles repo"
+mapfile -d '' -t sync_paths < <(git ls-files -z --cached -- "${scope[@]}")
+skipped=()
+for f in "${new_paths[@]}"; do
+    if (( $(stat -c %s "$f") <= 524288 )) && { [[ ! -s "$f" ]] || grep -Iq . "$f"; }; then
+        sync_paths+=("$f")
+    else
+        skipped+=("$f")
+    fi
+done
 if (( ${#sync_paths[@]} )); then
     git add -A -- "${sync_paths[@]}" >/dev/null 2>&1 || exit 0
 fi
@@ -110,5 +123,6 @@ same_branch || exit 0
 # created by another session between the audit above and this push.
 timeout 20 git -c push.followTags=false push -q --no-follow-tags \
     --recurse-submodules=no "$remote" "$head:$target" >/dev/null 2>&1 || fail "push to $remote failed"
+(( ${#skipped[@]} )) && fail "not synced, binary or > 512K (${#skipped[@]}): ${skipped[0]}, move data out of the roles repo"
 rm -f .git/superclaude-sync-failed
 exit 0

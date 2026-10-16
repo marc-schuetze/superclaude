@@ -114,7 +114,9 @@ snippets. The index (`.recall.sqlite`) is derived data, per machine, gitignored.
 
 `sc sync` (also the `SessionEnd` hook) commits only `memory/` and `notes/`,
 fetches, replays its own commits when both machines moved, and pushes. It never
-publishes other local changes. A failure is written to
+publishes other local changes. Those dirs hold text, not data: new binary files
+and files over 512K are never committed and are reported, more than 100 new
+files at once stop the sync. Keep data in a temp or project dir. A failure is written to
 `.git/superclaude-sync-failed` and shown in the status line.
 
 The hooks in role settings call `agent _recall`, `agent _status` and

@@ -64,6 +64,24 @@ class SyncScopeTests(unittest.TestCase):
                          {"home/memory/known.md", "home/notes/old.md", "home/notes/with space.md"})
         self.assertEqual(self.git("diff", "--name-only"), "home/CLAUDE.md")
 
+    def test_data_files_stay_out_and_are_reported(self):
+        self.write("home/notes/plan.md", "text\n")
+        (self.repo / "home/notes/shot.png").write_bytes(b"\x89PNG\0\0")
+        self.write("home/notes/big.txt", "x" * 600_000)
+        self.sync()
+        tree = self.git("ls-tree", "-r", "--name-only", "origin/main")
+        self.assertIn("home/notes/plan.md", tree)
+        self.assertNotIn("shot.png", tree)
+        self.assertNotIn("big.txt", tree)
+        self.assertIn("not synced", (self.repo / ".git/superclaude-sync-failed").read_text())
+
+    def test_bulk_drop_of_new_files_stops_the_sync(self):
+        for i in range(101):
+            self.write(f"home/notes/crawl/{i}.txt", "page\n")
+        self.sync()
+        self.assertEqual(self.remote_head(), self.initial)
+        self.assertIn("101 new files", (self.repo / ".git/superclaude-sync-failed").read_text())
+
     def test_mixed_staged_index_is_preserved(self):
         self.write("home/memory/known.md", "new\n")
         self.write("home/CLAUDE.md", "local rule edit\n")
