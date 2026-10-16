@@ -15,9 +15,11 @@ The repo is the generic base. Everything personal lives outside it, under
    `@sc_harness`), so names only have to be unique.
 2. **Profile.** A directory with optional parts, applied when a session starts:
 
-        CLAUDE.md               who it is (roles only; projects bring their own)
+        AGENTS.md               who it is (roles only; projects bring their own); read by
+                                every harness, CLAUDE.md is a symlink to it for claude
         mcp.json                its MCP servers; a profile gets exactly these, none without the file
-        system.md               appended to the system prompt (rules, not context)
+        system.md               appended to the system prompt (rules, not context);
+                                codex: developer instructions, opencode: instructions, vibe: none
         .agent                  key=value: harness= dirs= view= new= scratch=yes
         .claude/settings.json   hooks: recall before each prompt, sync on exit, status line
 

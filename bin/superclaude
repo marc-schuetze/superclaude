@@ -19,7 +19,7 @@
 # Local setup lives outside the repo:
 #   ~/.config/superclaude/config  KEY=VALUE lines: SC_PROFILES, SC_TMUX_SOCKET,
 #                                 SC_HARNESS, SC_LEGACY_SOCKETS, SCD_HOST
-#   $SC_PROFILES/ROLE/            a role: CLAUDE.md, mcp.json, system.md, .agent,
+#   $SC_PROFILES/ROLE/            a role: AGENTS.md (CLAUDE.md links to it), mcp.json, system.md, .agent,
 #                                 .claude/settings.json, memory/, notes/
 #   $SC_PROFILES/classes/CLASS/   a class: mcp.json, system.md, .agent, applied to a
 #                                 project repo; classes/map maps roots to classes
@@ -199,9 +199,16 @@ harness_cmd() {
             echo "$cmd" ;;
         # codex: same kit via -c overrides (CLAUDE.md, system.md, mcp.json, dirs)
         codex)    echo "codex --dangerously-bypass-approvals-and-sandbox $("$HERE/lib/codex_args.py" "$conf" "$dir")" ;;
-        opencode|vibe)
-            [[ -n "$conf" ]] && echo "superclaude: $h ignores the profile (mcp.json, system.md, dirs)" >&2
-            [[ "$h" == opencode ]] && echo "${SC_OPENCODE_CMD:-opencode --auto}" || echo "vibe --yolo --trust" ;;
+        # AGENTS.md (global and role) both read natively; system.md: opencode
+        # takes it as an extra instructions file, vibe has no slot for it
+        opencode)
+            [[ -n "$conf" ]] && echo "superclaude: opencode ignores mcp.json and dirs of the profile" >&2
+            local oc="${SC_OPENCODE_CMD:-opencode --auto}"
+            [[ -f "$conf/system.md" ]] && oc="env OPENCODE_CONFIG_CONTENT=$(printf %q "$(python3 -c 'import json,sys; print(json.dumps({"instructions": [sys.argv[1]]}))' "$conf/system.md")") $oc"
+            echo "$oc" ;;
+        vibe)
+            [[ -n "$conf" ]] && echo "superclaude: vibe ignores system.md, mcp.json and dirs of the profile" >&2
+            echo "vibe --yolo --trust" ;;
         *) die "unknown harness: $h (claude|codex|opencode|vibe)" ;;
     esac
 }
@@ -455,10 +462,10 @@ init_role() {
     [[ -d "$tpl" ]] || tpl="$HERE/templates/role"
     mkdir -p "$dir"
     cp -a "$tpl/." "$dir/"
-    sed -i "s/@ROLE@/$role/g" "$dir/CLAUDE.md"
+    sed -i "s/@ROLE@/$role/g" "$dir/AGENTS.md"
     mkdir -p "$dir/memory" "$dir/notes"
     touch "$dir/memory/.gitkeep" "$dir/notes/.gitkeep"
-    echo "created $dir — edit CLAUDE.md and mcp.json, then: sc $role"
+    echo "created $dir — edit AGENTS.md and mcp.json, then: sc $role"
 }
 
 # ---------- main ----------
