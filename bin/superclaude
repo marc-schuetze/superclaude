@@ -204,11 +204,23 @@ harness_cmd() {
         opencode)
             [[ -n "$conf" ]] && echo "superclaude: opencode ignores mcp.json and dirs of the profile" >&2
             local oc="${SC_OPENCODE_CMD:-opencode --auto}"
+            # --standalone: the shared background service keeps its own config and
+            # ignores the client's env (OPENCODE_CONFIG_CONTENT, OPENCODE_CONFIG)
+            [[ -n "$conf" ]] && oc="${oc/opencode /opencode --standalone }"
             [[ -f "$conf/system.md" ]] && oc="env OPENCODE_CONFIG_CONTENT=$(printf %q "$(python3 -c 'import json,sys; print(json.dumps({"instructions": [sys.argv[1]]}))' "$conf/system.md")") $oc"
             echo "$oc" ;;
         vibe)
-            [[ -n "$conf" ]] && echo "superclaude: vibe ignores system.md, mcp.json and dirs of the profile" >&2
-            echo "vibe --yolo --trust" ;;
+            # vibe reads AGENTS.md of every --add-dir: a class dir carries
+            # AGENTS.md -> system.md, dirs= repos bring their own
+            [[ -n "$conf" ]] && echo "superclaude: vibe ignores mcp.json of the profile" >&2
+            local vb="vibe --yolo --trust"
+            [[ -n "$conf" && "$conf" != "$dir" && -f "$conf/AGENTS.md" ]] && vb="$vb --add-dir $(printf %q "$conf")"
+            if [[ -n "$conf" ]]; then
+                local d IFS=','; for d in $(conf_get "$conf" dirs); do
+                    [[ -d "$d" ]] && vb="$vb --add-dir $(printf %q "$d")"
+                done
+            fi
+            echo "$vb" ;;
         *) die "unknown harness: $h (claude|codex|opencode|vibe)" ;;
     esac
 }

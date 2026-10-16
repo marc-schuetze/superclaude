@@ -19,7 +19,8 @@ The repo is the generic base. Everything personal lives outside it, under
                                 every harness, CLAUDE.md is a symlink to it for claude
         mcp.json                its MCP servers; a profile gets exactly these, none without the file
         system.md               appended to the system prompt (rules, not context);
-                                codex: developer instructions, opencode: instructions, vibe: none
+                                codex: developer instructions, opencode: instructions (--standalone),
+                                vibe: --add-dir of the class dir, whose AGENTS.md links to system.md
         .agent                  key=value: harness= dirs= view= new= scratch=yes
         .claude/settings.json   hooks: recall before each prompt, sync on exit, status line
 
@@ -143,4 +144,7 @@ Needs tmux, fzf >= 0.65, python3 (sqlite3 with FTS5), git, and the harness CLIs;
 `CLAUDE_CODE_SANDBOXED=1` (no folder-trust dialog). MCP secrets belong in your
 environment, never in the profiles repo.
 
-Tests: `python3 -m unittest discover tests`.
+Tests: `python3 -m unittest discover tests`. End to end: `tests/e2e_instructions.sh [harness...]`
+starts every harness the way superclaude does, against a local capture endpoint (no model,
+no tokens), and checks that global AGENTS.md, role AGENTS.md, class system.md and every skill
+reach the request.
