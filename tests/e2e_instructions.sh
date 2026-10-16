@@ -5,12 +5,13 @@
 #   global  first line of ~/.claude/CLAUDE.md (-> the global AGENTS.md)
 #   role    first line of $SC_PROFILES/$ROLE/AGENTS.md         (role session)
 #   class   first line of $SC_PROFILES/classes/$CLASS/system.md (class session, in this repo)
-#   skills  every skill name under ~/.claude/skills
-# ROLE/CLASS default to home/coding (SC_E2E_ROLE, SC_E2E_CLASS). Exit 1 on any miss.
+#   skills  every skill name under ~/.claude/skills, each description listed once
+# ROLE/CLASS default to home/coding (SC_E2E_ROLE, SC_E2E_CLASS). SC_E2E_KEEP=1 keeps the
+# captured requests. Exit 1 on any miss.
 set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 P="${SC_PROFILES:-/x/agents}"; ROLE="${SC_E2E_ROLE:-home}"; CLASS="${SC_E2E_CLASS:-coding}"
-TMP="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; [[ -n "${SC_E2E_KEEP:-}" ]] && echo "captures: $TMP" || rm -rf "$TMP"' EXIT
 fn="$TMP/fn.sh"; sed -n '/^conf_get() {/,/^}/p;/^harness_cmd() {/,/^}/p' "$HERE/bin/superclaude" > "$fn"
 first() { grep -m1 . "$1"; }
 
@@ -29,7 +30,7 @@ run() {  # $1 harness, $2 role|class, $3 port
     (cd "$dir" && timeout 180 bash -c "$cmd" </dev/null >"$out.log" 2>&1)
     kill "$cp" 2>/dev/null
     python3 - "$out" "$h" "$kind" "$(first ~/.claude/CLAUDE.md)" "$(first "$P/$ROLE/AGENTS.md")" "$(first "$P/classes/$CLASS/system.md")" <<'EOF'
-import glob, json, os, sys
+import glob, html, json, os, sys
 out, h, kind, g, r, c = sys.argv[1:]
 files = sorted(glob.glob(out + "/*.json"))
 if not files:
@@ -38,12 +39,18 @@ def strings(x):
     if isinstance(x, str): return [x]
     vals = x.values() if isinstance(x, dict) else x if isinstance(x, list) else []
     return [s for v in vals for s in strings(v)]
-text = "\n".join(strings(json.load(open(files[0]))))
+text = html.unescape("\n".join(strings(json.load(open(files[0])))))  # vibe escapes skill XML
 want = {"global": g, "role" if kind == "role" else "class": r if kind == "role" else c}
 want |= {f"skill:{s}": s for s in os.listdir(os.path.expanduser("~/.claude/skills"))}
 miss = [k for k, v in want.items() if v not in text]
-print(f"{'FAIL' if miss else 'ok  '} {h:8} {kind:5} {len(want) - len(miss)}/{len(want)}" + (f" missing: {miss}" if miss else ""))
-sys.exit(1 if miss else 0)
+def desc(s):  # first 60 chars of the skill description, the part a harness lists
+    fm = open(os.path.expanduser(f"~/.claude/skills/{s}/SKILL.md")).read().split("---")[1]
+    d = fm.split("description:", 1)[1].lstrip(" >-|\n").split("\n")[0].strip().strip('"')
+    return d[:60]
+dup = [s for s in os.listdir(os.path.expanduser("~/.claude/skills")) if text.count(desc(s)) > 1]
+bad = miss + [f"duplicate:{s}" for s in dup]
+print(f"{'FAIL' if bad else 'ok  '} {h:8} {kind:5} {len(want) - len(miss)}/{len(want)}" + (f" {bad}" if bad else ""))
+sys.exit(1 if bad else 0)
 EOF
 }
 
