@@ -64,6 +64,23 @@ class SyncScopeTests(unittest.TestCase):
                          {"home/memory/known.md", "home/notes/old.md", "home/notes/with space.md"})
         self.assertEqual(self.git("diff", "--name-only"), "home/CLAUDE.md")
 
+    def test_claude_md_copy_is_relinked_and_diverged_copy_reported(self):
+        self.write("ops/AGENTS.md", "rules\n")
+        (self.repo / "ops/CLAUDE.md").symlink_to("AGENTS.md")
+        self.write("dev/AGENTS.md", "rules\n")
+        (self.repo / "dev/CLAUDE.md").symlink_to("AGENTS.md")
+        self.git("add", ".")
+        self.git("commit", "-m", "roles")
+        self.git("push")
+        for role, text in (("ops", "rules\n"), ("dev", "edited\n")):
+            (self.repo / role / "CLAUDE.md").unlink()
+            self.write(f"{role}/CLAUDE.md", text)
+        self.sync()
+        self.assertTrue((self.repo / "ops/CLAUDE.md").is_symlink())
+        self.assertFalse((self.repo / "dev/CLAUDE.md").is_symlink())
+        self.assertIn("dev/CLAUDE.md is no symlink",
+                      (self.repo / ".git/superclaude-sync-failed").read_text())
+
     def test_data_files_stay_out_and_are_reported(self):
         self.write("home/notes/plan.md", "text\n")
         (self.repo / "home/notes/shot.png").write_bytes(b"\x89PNG\0\0")
