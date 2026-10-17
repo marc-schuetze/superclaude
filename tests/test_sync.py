@@ -78,7 +78,25 @@ class SyncScopeTests(unittest.TestCase):
         self.sync()
         self.assertTrue((self.repo / "ops/CLAUDE.md").is_symlink())
         self.assertFalse((self.repo / "dev/CLAUDE.md").is_symlink())
-        self.assertIn("dev/CLAUDE.md is no symlink",
+        self.assertIn("dev/CLAUDE.md no symlink",
+                      (self.repo / ".git/superclaude-sync-failed").read_text())
+
+    def test_claude_md_drift_survives_an_earlier_failure(self):
+        self.write("dev/AGENTS.md", "rules\n")
+        self.write("dev/CLAUDE.md", "edited\n")
+        self.git("remote", "set-url", "origin", str(self.root / "missing.git"))
+        self.write("home/memory/known.md", "new\n")
+        self.sync()
+        flag = (self.repo / ".git/superclaude-sync-failed").read_text()
+        self.assertIn("fetch from origin failed", flag)
+        self.assertIn("dev/CLAUDE.md no symlink", flag)
+
+    def test_claude_md_drift_survives_a_silent_skip(self):
+        self.write("dev/AGENTS.md", "rules\n")
+        self.write("dev/CLAUDE.md", "edited\n")
+        self.git("checkout", "-q", "--detach")
+        self.sync()
+        self.assertIn("dev/CLAUDE.md no symlink",
                       (self.repo / ".git/superclaude-sync-failed").read_text())
 
     def test_data_files_stay_out_and_are_reported(self):

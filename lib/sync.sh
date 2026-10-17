@@ -8,7 +8,7 @@ ROLES="${SC_PROFILES:?SC_PROFILES not set}"
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 cd "$ROLES" || exit 0
 exec 9>.git/agent-sync.lock; flock -n 9 || exit 0
-fail() { echo "$1" > .git/superclaude-sync-failed; echo "sc sync: $1" >&2; exit 0; }
+fail() { printf '%s\n' "$1" ${drift:+"$drift"} > .git/superclaude-sync-failed; echo "sc sync: $1" >&2; exit 0; }
 # CLAUDE.md is a symlink to AGENTS.md; sed -i and rename-writes replace it
 # with a copy. An unchanged copy is relinked, a diverged one is reported.
 [[ -d .githooks ]] && git config core.hooksPath .githooks
@@ -16,8 +16,11 @@ drift=""
 for a in */AGENTS.md; do
     c="${a%AGENTS.md}CLAUDE.md"
     [[ -L "$c" || ! -e "$c" ]] && continue
-    if cmp -s "$a" "$c"; then ln -sf AGENTS.md "$c"; else drift="$c"; fi
+    if cmp -s "$a" "$c"; then ln -sf AGENTS.md "$c"; else drift+="$c "; fi
 done
+# written now so no later exit path drops it; fail() keeps it next to its own reason
+[[ -n "$drift" ]] && drift="${drift% } no symlink, merge edits into AGENTS.md and relink" &&
+    echo "$drift" > .git/superclaude-sync-failed
 for r in */; do
     [[ -f "$r/CLAUDE.md" ]] && "$HERE/lib/recall.py" index "$r" >/dev/null 2>&1
 done
@@ -133,6 +136,6 @@ same_branch || exit 0
 timeout 20 git -c push.followTags=false push -q --no-follow-tags \
     --recurse-submodules=no "$remote" "$head:$target" >/dev/null 2>&1 || fail "push to $remote failed"
 (( ${#skipped[@]} )) && fail "not synced, binary or > 512K (${#skipped[@]}): ${skipped[0]}, move data out of the roles repo"
-[[ -n "$drift" ]] && fail "$drift is no symlink, merge its edits into AGENTS.md and relink"
+[[ -n "$drift" ]] && { echo "sc sync: $drift" >&2; exit 0; }
 rm -f .git/superclaude-sync-failed
 exit 0
