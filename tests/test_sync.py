@@ -282,6 +282,122 @@ class SyncScopeTests(unittest.TestCase):
         self.assertEqual(self.git("log", "-1", "--format=%s"), "concurrent")
         self.assertIn("moved", (self.repo / ".git/superclaude-sync-failed").read_text())
 
+    def test_existing_hooks_path_is_kept(self):
+        (self.repo / ".githooks").mkdir()
+        self.git("config", "core.hooksPath", "/custom/hooks")
+        self.sync()
+        self.assertEqual(self.git("config", "--get", "core.hooksPath"), "/custom/hooks")
+
+    def test_wrong_or_missing_claude_md_link_is_reported(self):
+        self.write("ops/AGENTS.md", "rules\n")
+        (self.repo / "ops/CLAUDE.md").symlink_to("../home/CLAUDE.md")
+        self.write("dev/AGENTS.md", "rules\n")
+        self.sync()
+        flag = (self.repo / ".git/superclaude-sync-failed").read_text()
+        self.assertIn("ops/CLAUDE.md", flag)
+        self.assertIn("dev/CLAUDE.md", flag)
+        self.assertEqual(os.readlink(self.repo / "ops/CLAUDE.md"), "../home/CLAUDE.md")
+
+    def test_already_staged_data_file_stays_out(self):
+        (self.repo / "home/notes/big.bin").write_bytes(b"\0" * 10)
+        self.write("home/notes/plan.md", "text\n")
+        self.git("add", "home/notes/big.bin")
+        self.sync()
+        tree = self.git("ls-tree", "-r", "--name-only", "origin/main")
+        self.assertIn("home/notes/plan.md", tree)
+        self.assertNotIn("big.bin", tree)
+        self.assertIn("not synced", (self.repo / ".git/superclaude-sync-failed").read_text())
+
+    def test_file_names_are_not_globs(self):
+        # git matches an existing path literally; a deleted one acts as a glob
+        self.write("home/notes/*", "text named like a glob\n")
+        self.git("add", ":(literal)home/notes/*")
+        self.git("commit", "-m", "glob name")
+        self.git("push")
+        (self.repo / "home/notes/*").unlink()
+        (self.repo / "home/notes/shot.png").write_bytes(b"\x89PNG\0\0")
+        self.sync()
+        tree = self.git("ls-tree", "-r", "--name-only", "origin/main")
+        self.assertNotIn("home/notes/*", tree)
+        self.assertNotIn("shot.png", tree)
+        self.assertNotIn("shot.png", self.git("diff", "--cached", "--name-only"))
+
+    def test_second_sync_waits_for_the_lock(self):
+        import fcntl
+        lock = open(self.repo / ".git/agent-sync.lock", "w")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        self.write("home/memory/known.md", "new\n")
+        proc = subprocess.Popen(["bash", str(SYNC)], env=self.env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        proc.wait(timeout=30)
+        self.assertEqual(self.remote_head(), self.git("rev-parse", "HEAD"))
+        self.assertNotEqual(self.remote_head(), self.initial)
+
+    def test_rejected_commit_is_reported(self):
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n")
+        (hooks / "pre-commit").chmod(0o755)
+        self.git("config", "core.hooksPath", str(hooks))
+        self.write("home/memory/known.md", "new\n")
+        self.sync()
+        self.assertEqual(self.remote_head(), self.initial)
+        self.assertIn("commit failed", (self.repo / ".git/superclaude-sync-failed").read_text())
+
+    def test_linked_worktree_syncs_and_flags_in_its_git_dir(self):
+        self.git("checkout", "-q", "--detach")
+        wt = self.root / "wt"
+        self.git("worktree", "add", "-q", str(wt), "main")
+        self.env["SC_PROFILES"] = str(wt)
+        (wt / "home/notes/shot.png").write_bytes(b"\x89PNG\0\0")
+        (wt / "home/memory/known.md").write_text("new\n")
+        self.sync()
+        self.assertEqual(self.remote_head(), self.git("rev-parse", "HEAD", cwd=wt))
+        self.assertNotEqual(self.remote_head(), self.initial)
+        gd = self.git("rev-parse", "--absolute-git-dir", cwd=wt)
+        self.assertIn("not synced", (Path(gd) / "superclaude-sync-failed").read_text())
+
+    def test_branch_moving_before_the_branch_update_is_kept(self):
+        self.write("home/memory/known.md", "here\n")
+        self.git("add", "home/memory/known.md")
+        self.git("commit", "-m", "sync: here")
+        self.other_clone_pushes("home/memory/there.md", "there\n")
+        wrapper_dir = self.root / "bin"
+        wrapper_dir.mkdir()
+        wrapper = wrapper_dir / "git"
+        once = self.root / "once"
+        # another session commits right before the branch is moved to the replay
+        wrapper.write_text("#!/bin/sh\n"
+                           f"if {{ [ \"$1\" = reset ] || [ \"$1\" = update-ref ]; }} && [ ! -e {shlex.quote(str(once))} ]; then "
+                           f"touch {shlex.quote(str(once))}; "
+                           f"{shlex.quote(self.real_git)} -C {shlex.quote(str(self.repo))} commit -q --allow-empty -m concurrent; fi\n"
+                           f"exec {shlex.quote(self.real_git)} \"$@\"\n")
+        wrapper.chmod(0o755)
+        self.env["PATH"] = str(wrapper_dir) + os.pathsep + self.env["PATH"]
+        self.sync()
+        self.assertEqual(self.git("log", "-1", "--format=%s"), "concurrent")
+        self.assertIn("moved", (self.repo / ".git/superclaude-sync-failed").read_text())
+
+    def test_stale_drift_flag_is_cleared_and_other_failures_kept(self):
+        flag = self.repo / ".git/superclaude-sync-failed"
+        flag.write_text("dev/CLAUDE.md no symlink, merge edits into AGENTS.md and relink\n")
+        self.git("checkout", "-q", "--detach")
+        self.sync()
+        self.assertFalse(flag.exists())
+        flag.write_text("push to origin failed\n")
+        self.write("dev/AGENTS.md", "rules\n")
+        self.write("dev/CLAUDE.md", "edited\n")
+        self.sync()
+        text = flag.read_text()
+        self.assertIn("push to origin failed", text)
+        self.assertIn("dev/CLAUDE.md no symlink", text)
+
 
 if __name__ == "__main__":
     unittest.main()

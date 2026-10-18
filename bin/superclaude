@@ -511,7 +511,7 @@ case "${1:-}" in
                input="$(cat)"; d="${2:-$PWD}"
                h="$(conf_get "$d" harness)"; h="${h:-$SC_HARNESS}"
                printf '\033[1;35m▌%s\033[0m' "${SC_LABEL:-${AGENT_LABEL:-ROLE $(basename "$d") · $h}}"
-               [[ -f "$SC_PROFILES/.git/superclaude-sync-failed" ]] && printf ' \033[1;31msync failed: sc sync\033[0m'
+               [[ -f "$(git -C "$SC_PROFILES" rev-parse --absolute-git-dir 2>/dev/null)/superclaude-sync-failed" ]] && printf ' \033[1;31msync failed: sc sync\033[0m'
                g="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline.sh"
                [[ -x "$g" ]] && printf ' · %s' "$(printf '%s' "$input" | "$g")"
                echo ;;

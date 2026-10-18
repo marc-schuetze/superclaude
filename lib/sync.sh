@@ -2,25 +2,40 @@
 # sync.sh (sc sync) — reindex every role's local memory, commit memory/ and notes/,
 # fetch, fast-forward or replay the sync commits onto the remote, push.
 # Quiet, never fails the caller (SessionEnd hook); a failure leaves
-# .git/superclaude-sync-failed with the reason, the status line shows it.
+# superclaude-sync-failed in the git dir with the reason, the status line shows it.
 set -uo pipefail
 ROLES="${SC_PROFILES:?SC_PROFILES not set}"
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 cd "$ROLES" || exit 0
-exec 9>.git/agent-sync.lock; flock -n 9 || exit 0
-fail() { printf '%s\n' "$1" ${drift:+"$drift"} > .git/superclaude-sync-failed; echo "sc sync: $1" >&2; exit 0; }
+# .git is a file in a linked worktree; the lock sits in the common dir so
+# every worktree of the repo shares it
+gitdir="$(git rev-parse --absolute-git-dir)" || exit 0
+common="$(git rev-parse --path-format=absolute --git-common-dir)" || exit 0
+flag="$gitdir/superclaude-sync-failed"
+fail() { printf '%s\n' "$1" ${drift:+"$drift"} > "$flag"; echo "sc sync: $1" >&2; exit 0; }
+# wait for a running sync instead of leaving this session's notes behind;
+# bounded like the 20s fetch + 20s push of the holder
+exec 9>"$common/agent-sync.lock"; flock -w 90 9 || fail "another sync held the lock > 90s, retry: sc sync"
 # CLAUDE.md is a symlink to AGENTS.md; sed -i and rename-writes replace it
-# with a copy. An unchanged copy is relinked, a diverged one is reported.
-[[ -d .githooks ]] && git config core.hooksPath .githooks
+# with a copy. An unchanged copy is relinked; a diverged copy, a link to
+# anything else and a missing CLAUDE.md are reported.
+[[ -d .githooks ]] && ! git config --get core.hooksPath >/dev/null && git config core.hooksPath .githooks
 drift=""
 for a in */AGENTS.md; do
+    [[ -f "$a" ]] || continue
     c="${a%AGENTS.md}CLAUDE.md"
-    [[ -L "$c" || ! -e "$c" ]] && continue
-    if cmp -s "$a" "$c"; then ln -sf AGENTS.md "$c"; else drift+="$c "; fi
+    if [[ -L "$c" ]]; then [[ "$(readlink "$c")" == AGENTS.md ]] || drift+="$c "
+    elif [[ ! -e "$c" ]]; then drift+="$c "
+    elif cmp -s "$a" "$c"; then ln -sf AGENTS.md "$c"
+    else drift+="$c "; fi
 done
-# written now so no later exit path drops it; fail() keeps it next to its own reason
-[[ -n "$drift" ]] && drift="${drift% } no symlink, merge edits into AGENTS.md and relink" &&
-    echo "$drift" > .git/superclaude-sync-failed
+# written now so no later exit path drops it; fail() keeps it next to its own reason.
+# Other failure lines stay, a stale drift line from an earlier run goes.
+drift_note="merge edits into AGENTS.md and relink"
+kept="$(grep -v "$drift_note\$" "$flag" 2>/dev/null)"
+[[ -n "$drift" ]] && drift="${drift% } no symlink to AGENTS.md, $drift_note"
+if [[ -n "$drift" ]]; then printf '%s\n' ${kept:+"$kept"} "$drift" > "$flag"
+elif [[ -z "$kept" ]]; then rm -f "$flag"; fi
 for r in */; do
     [[ -f "$r/CLAUDE.md" ]] && "$HERE/lib/recall.py" index "$r" >/dev/null 2>&1
 done
@@ -72,28 +87,34 @@ same_branch || exit 0
 scope=(':(glob)*/memory/**' ':(glob)*/notes/**')
 # memory/ and notes/ hold text a role writes, not data: new binary or large
 # files stay out and are reported, a bulk drop of new files stops the sync.
-# Data belongs in /x/temp or a project dir.
-mapfile -d '' -t new_paths < <(git ls-files -z --others --exclude-standard -- "${scope[@]}")
+# Data belongs in /x/temp or a project dir. New = untracked or staged but not in HEAD.
+mapfile -d '' -t new_paths < <(git ls-files -z --others --exclude-standard -- "${scope[@]}"
+    git diff --cached --no-renames --diff-filter=A --name-only -z -- "${scope[@]}")
 (( ${#new_paths[@]} <= 100 )) || fail "${#new_paths[@]} new files in memory/notes, move data out of the roles repo"
 mapfile -d '' -t sync_paths < <(git ls-files -z --cached -- "${scope[@]}")
 skipped=()
+declare -A skip=()
 for f in "${new_paths[@]}"; do
     if (( $(stat -c %s "$f") <= 524288 )) && { [[ ! -s "$f" ]] || grep -Iq . "$f"; }; then
         sync_paths+=("$f")
     else
-        skipped+=("$f")
+        skipped+=("$f"); skip["$f"]=1
     fi
 done
+# enumerated names are literal: a deleted "notes/*" must not glob in a skipped file
 if (( ${#sync_paths[@]} )); then
-    git add -A -- "${sync_paths[@]}" >/dev/null 2>&1 || exit 0
+    git --literal-pathspecs add -A -- "${sync_paths[@]}" >/dev/null 2>&1 || exit 0
 fi
-mapfile -d '' -t commit_paths < <(git diff --cached --no-renames --name-only -z -- "${scope[@]}")
+commit_paths=()
+while IFS= read -r -d '' f; do
+    [[ -n "${skip["$f"]:-}" ]] || commit_paths+=("$f")
+done < <(git diff --cached --no-renames --name-only -z -- "${scope[@]}")
 if (( ${#commit_paths[@]} )); then
     # --only keeps unrelated files out even if another session stages them
     # after the initial check. Such changes remain in the shared index.
     same_branch || exit 0
-    git commit --only -qm "sync: $(hostname -s) $(date +%F_%H:%M)" -- \
-        "${commit_paths[@]}" >/dev/null 2>&1 || exit 0
+    git --literal-pathspecs commit --only -qm "sync: $(hostname -s) $(date +%F_%H:%M)" -- \
+        "${commit_paths[@]}" >/dev/null 2>&1 || fail "commit failed (pre-commit hook or index.lock?)"
 fi
 same_branch || exit 0
 timeout 20 git fetch -q "$remote" "$target" >/dev/null 2>&1 || fail "fetch from $remote failed"
@@ -105,8 +126,9 @@ if git merge-base --is-ancestor "$head" "$fetched"; then
     git merge -q --ff-only "$fetched" >/dev/null 2>&1 || fail "fast-forward failed (local changes in the way?)"
 elif ! git merge-base --is-ancestor "$fetched" "$head"; then
     # Both sides moved: replay the local sync commits onto the remote in a
-    # throwaway worktree, then move the branch with reset --keep, which
-    # refuses instead of touching uncommitted files.
+    # throwaway worktree, then move the branch with a compare-and-swap and
+    # carry index/worktree along with read-tree -m -u, which refuses instead
+    # of touching uncommitted files.
     base="$(git merge-base "$head" "$fetched")" || fail "no merge base with $remote"
     only_sync_commits "$base" "$head" || fail "local commits outside memory/ and notes/: push them by hand"
     tmp="$(mktemp -d)"; new=""
@@ -121,10 +143,14 @@ elif ! git merge-base --is-ancestor "$fetched" "$head"; then
     git worktree remove --force "$tmp" >/dev/null 2>&1
     [[ -n "$new" ]] || fail "memory conflict with $remote: resolve by hand in $ROLES"
     same_branch || exit 0
-    # ponytail: a commit landing between this check and the reset is still lost
-    # from the branch (kept in the reflog); a real fix needs a ref transaction
-    [[ "$(git rev-parse "refs/heads/$branch")" == "$head" ]] || fail "branch moved during replay, retry: sc sync"
-    git reset -q --keep "$new" >/dev/null 2>&1 || fail "replayed sync commits not applied (local changes in the way?)"
+    # update-ref with the old value fails if another session committed meanwhile
+    git update-ref -m "sc sync: replay" "refs/heads/$branch" "$new" "$head" >/dev/null 2>&1 ||
+        fail "branch moved during replay, retry: sc sync"
+    if ! git read-tree -m -u "$head" "$new" >/dev/null 2>&1; then
+        # only undo our own move; a commit made since then stays
+        git update-ref -m "sc sync: replay undone" "refs/heads/$branch" "$head" "$new" >/dev/null 2>&1
+        fail "replayed sync commits not applied (local changes in the way?)"
+    fi
 fi
 same_branch || exit 0
 upstream="$(git rev-parse --verify "$upstream_ref")" || exit 0
@@ -137,5 +163,5 @@ timeout 20 git -c push.followTags=false push -q --no-follow-tags \
     --recurse-submodules=no "$remote" "$head:$target" >/dev/null 2>&1 || fail "push to $remote failed"
 (( ${#skipped[@]} )) && fail "not synced, binary or > 512K (${#skipped[@]}): ${skipped[0]}, move data out of the roles repo"
 [[ -n "$drift" ]] && { echo "sc sync: $drift" >&2; exit 0; }
-rm -f .git/superclaude-sync-failed
+rm -f "$flag"
 exit 0
