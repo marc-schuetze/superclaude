@@ -155,22 +155,35 @@ def check_mcp(roles, classes):
         if f.is_file():
             configs[str(p.relative_to(PROFILES))] = load_mcp_json(f)
             check_servers(configs[str(p.relative_to(PROFILES))], str(f))
+    glob = {}
     cj = HOME / ".claude.json"
     if cj.is_file():
         d = json.loads(cj.read_text())
         check_servers(d.get("mcpServers", {}), "~/.claude.json")
+        glob["claude"] = set(d.get("mcpServers", {}))
         for proj, v in (d.get("projects") or {}).items():
             check_servers((v or {}).get("mcpServers") or {}, f"~/.claude.json project {proj}")
     ct = CODEX / "config.toml"
     if ct.is_file():
-        check_servers(tomllib.loads(ct.read_text()).get("mcp_servers", {}), "~/.codex/config.toml")
+        cs = tomllib.loads(ct.read_text()).get("mcp_servers", {})
+        check_servers(cs, "~/.codex/config.toml")
+        glob["codex"] = set(cs)
     vt = Path(os.environ.get("VIBE_HOME", HOME / ".vibe")) / "config.toml"
     if vt.is_file():
-        check_servers({s.get("name"): s for s in tomllib.loads(vt.read_text()).get("mcp_servers", [])}, "~/.vibe/config.toml")
+        vs = {s.get("name"): s for s in tomllib.loads(vt.read_text()).get("mcp_servers", [])}
+        check_servers(vs, "~/.vibe/config.toml")
+        glob["vibe"] = set(vs)
     oc = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "opencode/opencode.json"
     if oc.is_file():
         m = json.loads(oc.read_text()).get("mcp", {})
         check_servers(m.get("servers", m), "opencode.json")
+        glob["opencode"] = set(m.get("servers", m))
+    # outside `agent` every harness should see the same global servers (marc, 27.10.: claude = codex)
+    if "claude" in glob and "codex" in glob and glob["claude"] != glob["codex"]:
+        report("FAIL", "parity", f"global MCP: claude {sorted(glob['claude'])} != codex {sorted(glob['codex'])}")
+    for h in ("vibe", "opencode"):
+        if h in glob and "claude" in glob and glob[h] != glob["claude"]:
+            report("WARN", "parity", f"global MCP: {h} {sorted(glob[h])} != claude {sorted(glob['claude'])}")
     return configs
 
 

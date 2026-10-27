@@ -66,6 +66,12 @@ class VerifyTests(unittest.TestCase):
             self.assertIn(needle, out)
         self.assertNotIn("FAIL parity  infra: codex", out)   # codex_args gives memory + hooks + same MCP names
 
+    def test_global_mcp_parity(self):
+        (self.home / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"type": "http", "url": "https://a"}, "b": {"type": "http", "url": "https://b"}}}))
+        (self.home / ".codex").mkdir()
+        (self.home / ".codex/config.toml").write_text('[mcp_servers.a]\nurl = "https://a"\n')
+        self.assertIn("global MCP: claude ['a', 'b'] != codex ['a']", self.run_verify()[1])
+
     def test_oversized_memory_index_fails(self):
         (self.role / "memory/MEMORY.md").write_text("- [A](a.md) — " + "x" * 26000 + "\n")
         self.assertIn("Claude loads only", self.run_verify()[1])
