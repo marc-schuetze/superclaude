@@ -12,7 +12,7 @@
   --host   runs `agent verify` on another machine over ssh
 NAME limits the role/class checks to these roles or classes. Stdlib only.
 """
-import json, os, re, select, shutil, subprocess, sys, time, tomllib, urllib.request
+import json, os, re, select, shlex, shutil, subprocess, sys, time, tomllib, urllib.request
 from pathlib import Path
 
 HOME = Path.home()
@@ -263,8 +263,9 @@ def main(argv):
     host = argv[argv.index("--host") + 1] if "--host" in argv else None
     if host:
         rest = [a for i, a in enumerate(argv) if a != "--host" and (i == 0 or argv[i - 1] != "--host")]
-        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, "bash", "-lc",
-                            "agent verify " + " ".join(map(repr, rest))], text=True)
+        # ssh joins its arguments into one remote command line: quote once, as a whole
+        remote = "bash -lc " + shlex.quote("agent verify " + " ".join(map(shlex.quote, rest)))
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, remote], text=True)
         return r.returncode
     names = [a for a in argv if not a.startswith("--")]
     roles, classes = profiles(names)
