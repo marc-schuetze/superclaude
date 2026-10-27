@@ -198,6 +198,10 @@ harness_cmd() {
             fi
             # Projects keep their own .claude/; add only the status line.
             [[ "$conf" != "$dir" ]] && cmd="$cmd --settings $(printf %q "$HERE/lib/project-settings.json")"
+            # Claude keys auto-memory by git repo, and all roles share the profiles repo
+            # (~/.claude/projects/-x-agents/memory): point each role at its own memory/
+            [[ -n "$conf" && "$conf" == "$dir" && -d "$conf/memory" ]] \
+                && cmd="$cmd --settings $(printf %q "{\"autoMemoryDirectory\": \"$conf/memory\"}")"
             # class skills (.claude/skills of the class dir): claude loads them from an --add-dir;
             # a role is the working dir itself, so its skills load natively
             [[ -n "$conf" && "$conf" != "$dir" && -d "$conf/.claude/skills" ]] && cmd="$cmd --add-dir $(printf %q "$conf")"

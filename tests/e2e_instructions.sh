@@ -6,11 +6,12 @@
 #   role    first line of $SC_PROFILES/$ROLE/AGENTS.md         (role session)
 #   class   first line of $SC_PROFILES/classes/$CLASS/system.md (class session, in this repo)
 #   skills  every skill name under ~/.claude/skills, each description listed once
+# role: also its .claude/skills and memory/MEMORY.md; class: its .claude/skills.
 # ROLE/CLASS default to home/coding (SC_E2E_ROLE, SC_E2E_CLASS). SC_E2E_KEEP=1 keeps the
 # captured requests. Exit 1 on any miss.
 set -uo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-P="${SC_PROFILES:-/x/agents}"; ROLE="${SC_E2E_ROLE:-home}"; CLASS="${SC_E2E_CLASS:-coding}"
+export P="${SC_PROFILES:-/x/agents}" ROLE="${SC_E2E_ROLE:-home}" CLASS="${SC_E2E_CLASS:-coding}"
 TMP="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; [[ -n "${SC_E2E_KEEP:-}" ]] && echo "captures: $TMP" || rm -rf "$TMP"' EXIT
 fn="$TMP/fn.sh"; sed -n '/^conf_get() {/,/^}/p;/^harness_cmd() {/,/^}/p' "$HERE/bin/superclaude" > "$fn"
 first() { grep -m1 . "$1"; }
@@ -42,6 +43,13 @@ def strings(x):
 text = html.unescape("\n".join(strings(json.load(open(files[0])))))  # vibe escapes skill XML
 want = {"global": g, "role" if kind == "role" else "class": r if kind == "role" else c}
 want |= {f"skill:{s}": s for s in os.listdir(os.path.expanduser("~/.claude/skills"))}
+# role/class kit beyond the rules: its own skills and, for a role, the memory index
+prof = os.environ["P"] + (f"/{os.environ['ROLE']}" if kind == "role" else f"/classes/{os.environ['CLASS']}")
+sk = prof + "/.claude/skills"
+want |= {f"{kind}-skill:{s}": s for s in (os.listdir(sk) if os.path.isdir(sk) else []) if not s.startswith(".")}
+idx = prof + "/memory/MEMORY.md"
+if kind == "role" and os.path.isfile(idx):
+    want["memory"] = next(l.strip() for l in open(idx) if l.strip())[:60]
 miss = [k for k, v in want.items() if v not in text]
 def desc(s):  # first 60 chars of the skill description, the part a harness lists
     fm = open(os.path.expanduser(f"~/.claude/skills/{s}/SKILL.md")).read().split("---")[1]
