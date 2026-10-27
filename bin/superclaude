@@ -14,6 +14,8 @@
 #   sc init ROLE          scaffold a role from templates/role
 #   sc recall ROLE Q      query the role's local memory index
 #   sc sync               commit/pull/push memory + notes of all roles
+#   sc verify [--mcp] [--host H] [NAME..]  read-only check: skills, MCP, memory,
+#                         claude/codex parity; --mcp starts every server once
 #   sc -h HARNESS ...     claude (default) | codex | opencode | vibe
 #
 # Local setup lives outside the repo:
@@ -506,6 +508,7 @@ case "${1:-}" in
                printf '{"prompt": %s}' "$(python3 -c 'import json,sys; print(json.dumps(" ".join(sys.argv[1:])))' "$@")" \
                  | "$HERE/lib/recall.py" query "$d" | python3 -c 'import json,sys; d=sys.stdin.read().strip(); print(json.loads(d)["hookSpecificOutput"]["additionalContext"] if d else "(no hits)")' ;;
     sync)      exec "$HERE/lib/sync.sh" ;;
+    verify)    shift; exec "$HERE/lib/verify.py" "$@" ;;
     help|--help) sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//' ;;
     # internal: hooks in profiles call these through `agent`, keep the names stable
     _projects) projects "${2:-}" ;;
