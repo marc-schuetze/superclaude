@@ -196,6 +196,9 @@ harness_cmd() {
             fi
             # Projects keep their own .claude/; add only the status line.
             [[ "$conf" != "$dir" ]] && cmd="$cmd --settings $(printf %q "$HERE/lib/project-settings.json")"
+            # class skills (.claude/skills of the class dir): claude loads them from an --add-dir;
+            # a role is the working dir itself, so its skills load natively
+            [[ -n "$conf" && "$conf" != "$dir" && -d "$conf/.claude/skills" ]] && cmd="$cmd --add-dir $(printf %q "$conf")"
             echo "$cmd" ;;
         # codex: same kit via -c overrides (CLAUDE.md, system.md, mcp.json, dirs)
         codex)    echo "codex --dangerously-bypass-approvals-and-sandbox $("$HERE/lib/codex_args.py" "$conf" "$dir")" ;;
