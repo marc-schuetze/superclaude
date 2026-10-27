@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """recall.py — local FTS5 memory for a role (sc recall, sc _recall hook).
 
-    recall.py index [ROLE_DIR]      (re)index memory/, notes/ and the role's Claude
-                                 session transcripts into ROLE_DIR/.recall.sqlite
+    recall.py index [ROLE_DIR]      (re)index memory/, notes/ and the role's Claude and
+                                 Codex session transcripts into ROLE_DIR/.recall.sqlite
     recall.py query [ROLE_DIR]      read a Claude Code UserPromptSubmit hook payload
-                                 on stdin, print the best snippets as context
+                                 on stdin (Claude Code or Codex), print the best snippets
+                                 as context
 
 ROLE_DIR defaults to $CLAUDE_PROJECT_DIR or the cwd. The DB is derived data:
 gitignored, rebuilt per machine. Stdlib only.
@@ -53,11 +54,49 @@ def transcript_text(path):
             out.append(("U: " if d["type"] == "user" else "A: ") + text[:2000])
     return "\n\n".join(out)
 
+def codex_text(path):
+    """Codex rollout: user/assistant messages (response_item, role user|assistant)."""
+    out = []
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        p = d.get("payload") or {}
+        if d.get("type") != "response_item" or p.get("type") != "message" or p.get("role") not in ("user", "assistant"):
+            continue
+        text = " ".join(c.get("text", "") for c in p.get("content") or [] if isinstance(c, dict)).strip()
+        if text and not text.startswith("<") and len(text) > 20:
+            out.append(("U: " if p["role"] == "user" else "A: ") + text[:2000])
+    return "\n\n".join(out)
+
+def codex_sessions(con, role):
+    """Codex rollouts whose session_meta cwd is the role dir; other cwds are remembered and skipped."""
+    root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"
+    con.execute("CREATE TABLE IF NOT EXISTS other(src PRIMARY KEY)")
+    other = {r[0] for r in con.execute("SELECT src FROM other")}
+    mine = []
+    for p in root.rglob("rollout-*.jsonl") if root.is_dir() else []:
+        if str(p) in other:
+            continue
+        try:
+            with p.open(errors="replace") as fh:
+                cwd = (json.loads(fh.readline()).get("payload") or {}).get("cwd")
+        except (OSError, ValueError):
+            continue
+        if cwd and Path(cwd).resolve() == role:
+            mine.append(p)
+        elif cwd:
+            con.execute("INSERT OR IGNORE INTO other(src) VALUES (?)", (str(p),))
+    return mine
+
 def index(role):
     con = db(role)
     files = [p for sub in ("memory", "notes") for p in (role / sub).rglob("*.md")]
     tdir = transcript_dir(role)
     files += list(tdir.glob("*.jsonl")) if tdir.is_dir() else []
+    codex = set(codex_sessions(con, role))
+    files += sorted(codex)
     n = 0
     # forget files that were deleted since the last run
     for (src,) in con.execute("SELECT src FROM seen").fetchall():
@@ -70,7 +109,7 @@ def index(role):
         row = con.execute("SELECT mtime FROM seen WHERE src=?", (src,)).fetchone()
         if row and row[0] >= mtime:
             continue
-        text = transcript_text(p) if p.suffix == ".jsonl" else p.read_text(errors="replace")
+        text = codex_text(p) if p in codex else transcript_text(p) if p.suffix == ".jsonl" else p.read_text(errors="replace")
         con.execute("DELETE FROM doc WHERE src=?", (src,))
         for c in chunks(text):
             con.execute("INSERT INTO doc(src, ts, body) VALUES (?,?,?)", (src, mtime, c))
