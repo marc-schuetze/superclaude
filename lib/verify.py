@@ -235,7 +235,11 @@ def check_memory(roles):
             report("FAIL", "memory", f"{r.name}: MEMORY.md {size} bytes / {lines} lines, Claude loads only ~{MEMORY_LIMIT} bytes / 200 lines")
         elif size > MEMORY_LIMIT * 0.9:
             report("WARN", "memory", f"{r.name}: MEMORY.md {size} bytes, close to the ~{MEMORY_LIMIT} byte load limit")
-        linked = set(re.findall(r"\]\(([^)]+\.md)\)", text))
+        link = re.compile(r"\]\(([^)\s]+\.md)\)")
+        linked = set(link.findall(text))
+        # topic-*.md hubs linked from the index count as index too (one level)
+        for hub in [l for l in linked if Path(l).name.startswith("topic-") and (mem / l).is_file()]:
+            linked |= set(link.findall((mem / hub).read_text(errors="replace")))
         files = {p.name for p in mem.glob("*.md") if p.name != "MEMORY.md"}
         dead = sorted(l for l in linked if not (mem / l).is_file())
         orphans = sorted(files - {Path(l).name for l in linked})
