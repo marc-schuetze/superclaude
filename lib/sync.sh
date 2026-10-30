@@ -81,7 +81,7 @@ only_sync_commits() {
     done
 }
 head="$(git rev-parse "refs/heads/$branch")" || exit 0
-only_sync_commits "$upstream" "$head" || fail "local commits outside memory/ and notes/: push them by hand"
+only_sync_commits "$upstream" "$head" || fail "local commits outside memory/ and notes/ or a merge commit: push them by hand"
 same_branch || exit 0
 
 scope=(':(glob)*/memory/**' ':(glob)*/notes/**')
@@ -130,7 +130,7 @@ elif ! git merge-base --is-ancestor "$fetched" "$head"; then
     # carry index/worktree along with read-tree -m -u, which refuses instead
     # of touching uncommitted files.
     base="$(git merge-base "$head" "$fetched")" || fail "no merge base with $remote"
-    only_sync_commits "$base" "$head" || fail "local commits outside memory/ and notes/: push them by hand"
+    only_sync_commits "$base" "$head" || fail "local commits outside memory/ and notes/ or a merge commit: push them by hand"
     tmp="$(mktemp -d)"; new=""
     git worktree add -q --detach "$tmp" "$fetched" >/dev/null 2>&1 || fail "worktree for replay failed"
     # ponytail: a commit the remote already has stops the replay as "empty" and is
