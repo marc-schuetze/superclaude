@@ -1,4 +1,5 @@
 """Drive bin/superclaude against a private tmux server, a fake claude and a temp config."""
+import datetime
 import os
 import re
 from pathlib import Path
@@ -89,6 +90,13 @@ class EngineTests(unittest.TestCase):
                            capture_output=True, text=True, timeout=30)
         self.assertTrue((self.tmp / "my-proj/.git").is_dir(), r.stderr)
         self.assertEqual([s[1] for s in self.sessions()], [str(self.tmp / "my-proj")])
+
+    def test_new_task_dir_gets_date_on_date_yes(self):
+        (self.prof / "classes/temp/.agent").write_text("view=temp\nnew=what?\ndate=yes\n")
+        r = subprocess.run([str(SC), "temp"], env=self.env, input="build a thing\n",
+                           capture_output=True, text=True, timeout=30)
+        d = self.tmp / f"{datetime.date.today().isoformat()}-my-proj"
+        self.assertTrue(d.is_dir(), r.stderr)
 
     def test_views_from_classes(self):
         self.assertEqual(self.sc("_view", "next").stdout.count("reload("), 1)

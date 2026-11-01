@@ -26,7 +26,7 @@
 #   $SC_PROFILES/classes/CLASS/   a class: mcp.json, system.md, .agent, applied to a
 #                                 project repo; classes/map maps roots to classes
 #   $SC_PROFILES/templates/role/  overrides the repo's role template
-#   .agent keys                   harness= dirs= (roles) · view= new= git=yes scratch=yes (classes)
+#   .agent keys                   harness= dirs= (roles) · view= new= git=yes date=yes scratch=yes (classes)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -161,6 +161,7 @@ new_project() {
     name="$(tr '[:upper:]' '[:lower:]' <<<"$name" | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
     [[ -n "$name" ]] || name="$(tr '[:upper:]' '[:lower:]' <<<"$2" | tr -cs 'a-z0-9' '-' | cut -d- -f1-4 | sed 's/^-*//; s/-*$//')"
     [[ -n "$name" ]] || name="task"
+    [[ "$(conf_get "$CLASSES/$1" date)" == yes ]] && name="$(date +%F)-$name"
     base="$name"; while [[ -e "$root/$name" ]]; do name="$base-$i"; ((i++)); done
     mkdir -p "$root/$name"
     [[ "$(conf_get "$CLASSES/$1" git)" == yes ]] && git -C "$root/$name" init -q >&2
