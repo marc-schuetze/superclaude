@@ -1,10 +1,12 @@
 """Drive bin/superclaude against a private tmux server, a fake claude and a temp config."""
 import datetime
+import json
 import os
 import re
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 SC = Path(__file__).resolve().parents[1] / "bin" / "superclaude"
@@ -37,7 +39,8 @@ class EngineTests(unittest.TestCase):
         # SC_* from a running sc session would beat the test config
         env = {k: v for k, v in os.environ.items() if not k.startswith("SC")}
         self.env = dict(env, PATH=f"{fake}:{os.environ['PATH']}", SC_CONFIG=str(conf),
-                        SC_TMUX_SOCKET=self.sock, CLAUDE_CONFIG_DIR=str(root / "claude"))
+                        SC_TMUX_SOCKET=self.sock, CLAUDE_CONFIG_DIR=str(root / "claude"),
+                        CODEX_HOME=str(root / "codex"), TMPDIR=str(root))
         self.env.pop("TMUX", None)
 
     def sc(self, *args):
@@ -66,6 +69,30 @@ class EngineTests(unittest.TestCase):
         self.sc("kill", "foo")
         self.assertEqual([s[2] for s in self.sessions()], ["a.b", "foo-2"])
 
+    def test_codex_role_with_large_instructions_starts_and_preserves_args(self):
+        instructions = "role rules 'quoted' \"double\" $HOME $(false)\n" * 1000
+        (self.prof / "home/system.md").write_text(instructions)
+        captured = self.root / "codex-args.json"
+        fake = self.root / "bin/codex"
+        fake.write_text(
+            "#!/usr/bin/env python3\nimport json, os, sys\n"
+            f"with open({str(captured)!r}, 'w') as f: json.dump(sys.argv[1:], f)\n"
+            "os.execlp('sleep', 'sleep', '300')\n")
+        fake.chmod(0o755)
+        prompt = "check 'quotes' and $HOME\nsecond line"
+        r = self.sc("-h", "codex", "home", prompt)
+        self.assertIn("started", r.stdout, r.stderr)
+        for _ in range(100):
+            if captured.exists() and captured.stat().st_size:
+                break
+            time.sleep(0.02)
+        a = json.loads(captured.read_text())
+        self.assertEqual(a[-1], prompt)
+        dev = next(x.split("=", 1)[1] for x in a if x.startswith("developer_instructions="))
+        self.assertEqual(json.loads(dev), instructions)
+        self.assertEqual([s[2] for s in self.sessions()], ["home"])
+        self.assertEqual(list(self.root.glob("sc-launch.*")), [])
+
     def test_role_session_links_memory_and_refuses_a_foreign_link(self):
         self.sc("home")
         proj = self.root / "claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.prof / "home"))
@@ -74,6 +101,15 @@ class EngineTests(unittest.TestCase):
         (proj / "memory").symlink_to(self.root)
         r = self.sc("home")
         self.assertIn("points to", r.stderr)
+
+    def test_failed_tmux_start_reports_error_and_removes_launcher(self):
+        fake = self.root / "bin/tmux"
+        fake.write_text("#!/bin/sh\necho 'test: server unavailable' >&2\nexit 1\n")
+        fake.chmod(0o755)
+        r = self.sc("foo")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("test: server unavailable", r.stderr)
+        self.assertEqual(list(self.root.glob("sc-launch.*")), [])
 
     def test_existing_memory_is_moved_without_losing_a_clash(self):
         proj = self.root / "claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.prof / "home"))

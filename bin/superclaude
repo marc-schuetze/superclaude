@@ -260,7 +260,7 @@ attach_or_switch() {
 open_session() {
     # $1 key, $2 working dir, $3 profile dir (may be empty), $4 status label.
     # Always a new session; running ones are reached through the picker.
-    local key="$1" dir="$2" conf="$3" label="$4" h cmd base name i=1
+    local key="$1" dir="$2" conf="$3" label="$4" h cmd base name launch error i=1
     h="${HARNESS_EXPLICIT:-$([[ -z "$conf" ]] || conf_get "$conf" harness)}"
     h="${h:-$SC_HARNESS}"
     cmd="$(harness_cmd "$dir" "$conf" "$h")"
@@ -274,10 +274,15 @@ open_session() {
     # roles keep memory in the synced role dir; projects use Claude's own
     [[ "$h" == claude && -n "$conf" && "$conf" == "$dir" ]] && ensure_memory_link "$dir"
     base="$PREFIX|${dir//[.:]/_}"; name="$base"   # tmux turns . and : into _
+    # Role instructions can exceed tmux's command limit; the private script deletes itself before exec.
+    launch="$(mktemp "${TMPDIR:-/tmp}/sc-launch.XXXXXXXX")"
+    printf 'rm -- "$0" || exit\nexec %s\n' "$cmd" > "$launch" \
+        || { rm -f -- "$launch"; die "could not write session launcher"; }
     # new-session fails on a taken name: try the next suffix (no check-then-create race)
-    until tm new-session -d -s "$name" -c "$dir" -e "SC_LABEL=$label · $h" "$cmd" 2>/dev/null; do
-        tm has-session -t "=$name" 2>/dev/null || die "tmux could not start $name"
-        ((++i > 99)) && die "no free session name for $dir"
+    until error="$(tm new-session -d -s "$name" -c "$dir" -e "SC_LABEL=$label · $h" "bash $(printf %q "$launch")" 2>&1)"; do
+        tm has-session -t "=$name" 2>/dev/null \
+            || { rm -f -- "$launch"; die "tmux could not start $name: $error"; }
+        ((++i > 99)) && { rm -f -- "$launch"; die "no free session name for $dir"; }
         name="$base-$i"
     done
     tm set-option -t "=$name:" @sc_key "$key"
