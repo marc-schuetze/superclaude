@@ -48,6 +48,8 @@ The repo is the generic base. Everything personal lives outside it, under
     sc temp               class with new=: asks for the task, creates a haiku-named dir
     sc ~/some/dir         any dir; class from the map if it lies under a root
     sc -h codex home      run codex instead of claude for this session
+    sc resume ID          new session resuming Claude session ID in its start dir, with its profile
+    sc resume ID NAME     same, in a role/project/path (the dir moved: the transcript is copied over)
     sc ls                 roles, then running sessions (with Claude's topic)
     sc kill home          kill every session of a role or project (or one by name)
     sc init home          scaffold a role from templates/role

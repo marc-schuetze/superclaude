@@ -69,6 +69,33 @@ class EngineTests(unittest.TestCase):
         self.sc("kill", "foo")
         self.assertEqual([s[2] for s in self.sessions()], ["a.b", "foo-2"])
 
+    def test_resume_starts_claude_in_the_recorded_dir_and_follows_a_moved_one(self):
+        argv = self.root / "claude-args"
+        fake = self.root / "bin/claude"
+        fake.write_text(f'#!/bin/sh\necho "$@" >> {argv}\nexec sleep 300\n')
+        sid = "2575ef35-4a46-4488-b203-88cbe8474415"
+        proj = lambda d: self.root / "claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(d))
+        old = proj(self.code / "gone")
+        (old / sid).mkdir(parents=True)
+        (old / f"{sid}.jsonl").write_text(json.dumps({"cwd": str(self.code / "gone")}) + "\n")
+        r = self.sc("resume", sid)
+        self.assertIn("is gone", r.stderr)
+        r = self.sc("resume", sid, "foo")
+        self.assertIn("started", r.stdout, r.stderr)
+        self.assertTrue((proj(self.code / "foo") / f"{sid}.jsonl").exists())
+        self.assertTrue((proj(self.code / "foo") / sid).is_dir())
+        (proj(self.prof / "home")).mkdir(parents=True)
+        (proj(self.prof / "home") / f"{sid[:-1]}0.jsonl").write_text(json.dumps({"cwd": str(self.prof / "home")}) + "\n")
+        r = self.sc("resume", f"{sid[:-1]}0")
+        self.assertIn("started", r.stdout, r.stderr)
+        self.assertEqual([s[2] for s in self.sessions()], ["foo", "home"])
+        for _ in range(100):
+            if argv.exists() and len(argv.read_text().splitlines()) == 2:
+                break
+            time.sleep(0.02)
+        self.assertEqual([l.count(f"--resume {sid[:-1]}") for l in argv.read_text().splitlines()], [1, 1])
+        self.assertIn("--strict-mcp-config", argv.read_text())   # the role kept its profile
+
     def test_codex_role_with_large_instructions_starts_and_preserves_args(self):
         instructions = "role rules 'quoted' \"double\" $HOME $(false)\n" * 1000
         (self.prof / "home/system.md").write_text(instructions)

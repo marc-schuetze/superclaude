@@ -9,6 +9,8 @@
 #   sc NAME [PROMPT]      new session for a role, class or project; PROMPT is the
 #                         first message. NAME: role | CLASS [PROJECT] | PROJECT | PATH
 #   sc new NAME [PROMPT]  same as sc NAME
+#   sc resume ID [NAME]   new session that resumes Claude session ID, in its start dir
+#                         (or NAME: role | PROJECT | PATH, e.g. after a dir was moved)
 #   sc ls                 roles and running sessions
 #   sc kill NAME          kill a session by name, or every session of a role/project
 #   sc init ROLE          scaffold a role from templates/role
@@ -182,6 +184,7 @@ harness_cmd() {
             local cmd="env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY CLAUDE_CODE_SANDBOXED=1 claude"
             [[ -n "${INITIAL_PROMPT:-}" ]] && cmd="$cmd $(printf %q "$INITIAL_PROMPT")"
             cmd="$cmd --dangerously-skip-permissions"
+            [[ -n "${RESUME_ID:-}" ]] && cmd="$cmd --resume $(printf %q "$RESUME_ID")"
             if [[ -n "$conf" ]]; then
                 # a profile gets exactly its own MCP servers, none without mcp.json
                 if [[ -f "$conf/mcp.json" ]]; then
@@ -323,6 +326,30 @@ open_any() {
     key="$(basename "$dir")"
     is_role "$key" && key="$key@${class:-dir}"   # keep role keys unambiguous
     INITIAL_PROMPT="$*" open_session "$key" "$dir" "${class:+$CLASSES/$class}" "${class:+$class }$key"
+}
+
+resume_session() {
+    # $1 Claude session id, $2 optional NAME|PATH. Claude finds a transcript only
+    # under the project key of its working dir: a moved session gets a copy there.
+    local id="${1:-}" f dir dst
+    [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || die "usage: sc resume SESSION-ID [NAME|PATH]"
+    f="$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects" -mindepth 2 -maxdepth 2 -name "$id.jsonl" -print -quit)"
+    [[ -n "$f" ]] || die "no transcript for $id"
+    if [[ -n "${2:-}" ]]; then
+        if is_role "$2"; then dir="$(role_dir "$2")"; else dir="$(find_project "$2")"; fi
+    else
+        dir="$(grep -m1 -oP '"cwd": *"\K[^"]+' "$f")" || die "no working dir recorded in $f"
+        [[ -d "$dir" ]] || die "$dir is gone; give the new place: sc resume $id NAME|PATH"
+    fi
+    dst="$(claude_proj "$dir")"
+    if [[ "$dst" != "$(dirname "$f")" ]]; then
+        mkdir -p -- "$dst"
+        cp -a --update=none -- "$f" "$dst/"
+        [[ -d "${f%.jsonl}" ]] && cp -a --update=none -- "${f%.jsonl}" "$dst/"
+    fi
+    # a role by its name, so it gets its profile; a Claude transcript needs claude
+    [[ "$dir" == "$SC_PROFILES/"* ]] && is_role "${dir#"$SC_PROFILES/"}" && dir="${dir#"$SC_PROFILES/"}"
+    HARNESS_EXPLICIT=claude RESUME_ID="$id" open_any "$dir"
 }
 
 delete_scratch() {
@@ -512,6 +539,7 @@ case "${1:-}" in
     kill)      [[ -n "${2:-}" ]] || die "usage: sc kill NAME"
                if tm has-session -t "=$2" 2>/dev/null; then tm kill-session -t "=$2" && echo "killed $2"
                else for s in $(sessions_where @sc_key "$2"); do tm kill-session -t "=$s" && echo "killed $s"; done; fi ;;
+    resume)    shift; resume_session "$@" ;;
     init)      [[ -n "${2:-}" ]] || die "usage: sc init ROLE"; init_role "$2" ;;
     recall)    [[ -n "${2:-}" && -n "${3:-}" ]] || die "usage: sc recall ROLE QUERY..."
                d="$(role_dir "$2")"; shift 2
@@ -519,7 +547,7 @@ case "${1:-}" in
                  | "$HERE/lib/recall.py" query "$d" | python3 -c 'import json,sys; d=sys.stdin.read().strip(); print(json.loads(d)["hookSpecificOutput"]["additionalContext"] if d else "(no hits)")' ;;
     sync)      exec "$HERE/lib/sync.sh" ;;
     verify)    shift; exec "$HERE/lib/verify.py" "$@" ;;
-    help|--help) sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+    help|--help) sed -n '2,31p' "$SELF" | sed 's/^# \{0,1\}//' ;;
     # internal: hooks in profiles call these through `agent`, keep the names stable
     _projects) projects "${2:-}" ;;
     _picklist) picklist "${2:-roles}" ;;
