@@ -103,7 +103,9 @@ for f in "${new_paths[@]}"; do
 done
 # enumerated names are literal: a deleted "notes/*" must not glob in a skipped file
 if (( ${#sync_paths[@]} )); then
-    git --literal-pathspecs add -A -- "${sync_paths[@]}" >/dev/null 2>&1 || exit 0
+    # a stale .git/index.lock lands here; skipping silently would stop every later sync unseen
+    add_err="$(git --literal-pathspecs add -A -- "${sync_paths[@]}" 2>&1 >/dev/null)" ||
+        fail "git add failed: $(grep -m1 '^fatal:' <<< "$add_err" || echo "${add_err%%$'\n'*}")"
 fi
 commit_paths=()
 while IFS= read -r -d '' f; do

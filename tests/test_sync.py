@@ -339,6 +339,15 @@ class SyncScopeTests(unittest.TestCase):
         self.assertEqual(self.remote_head(), self.git("rev-parse", "HEAD"))
         self.assertNotEqual(self.remote_head(), self.initial)
 
+    def test_stale_index_lock_is_reported(self):
+        self.write("home/memory/known.md", "new\n")
+        (self.repo / ".git/index.lock").touch()
+        self.sync()
+        self.assertEqual(self.remote_head(), self.initial)
+        flag = (self.repo / ".git/superclaude-sync-failed").read_text()
+        self.assertIn("git add failed", flag)
+        self.assertIn("index.lock", flag)
+
     def test_rejected_commit_is_reported(self):
         hooks = self.root / "hooks"
         hooks.mkdir()
