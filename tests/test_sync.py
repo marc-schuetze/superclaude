@@ -172,6 +172,7 @@ class SyncScopeTests(unittest.TestCase):
         self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
         self.assertEqual(self.remote_head(), self.initial)
 
+        self.assertIn("no upstream", (self.repo / ".git/superclaude-sync-failed").read_text())
     def test_detached_head_skips_without_staging(self):
         self.git("checkout", "--detach")
         self.write("home/memory/known.md", "new\n")
@@ -180,6 +181,7 @@ class SyncScopeTests(unittest.TestCase):
         self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
         self.assertEqual(self.remote_head(), self.initial)
 
+        self.assertIn("detached HEAD", (self.repo / ".git/superclaude-sync-failed").read_text())
     def test_branch_switch_during_fetch_does_not_publish_other_branch(self):
         self.git("checkout", "-b", "other")
         self.write("home/CLAUDE.md", "unrelated rule on other branch\n")
@@ -199,6 +201,7 @@ class SyncScopeTests(unittest.TestCase):
         self.sync()
         self.assertEqual(self.git("branch", "--show-current"), "other")
         self.assertEqual(self.remote_head(), self.initial)
+        self.assertIn("branch changed during sync", (self.repo / ".git/superclaude-sync-failed").read_text())
 
     def test_failed_push_retries_existing_memory_commit(self):
         hook = self.remote / "hooks/pre-receive"
@@ -401,7 +404,9 @@ class SyncScopeTests(unittest.TestCase):
         flag.write_text("dev/CLAUDE.md no symlink, merge edits into AGENTS.md and relink\n")
         self.git("checkout", "-q", "--detach")
         self.sync()
-        self.assertFalse(flag.exists())
+        self.assertNotIn("dev/CLAUDE.md no symlink", flag.read_text())
+        self.assertIn("detached HEAD", flag.read_text())
+        self.git("checkout", "-q", "main")
         flag.write_text("push to origin failed\n")
         self.write("dev/AGENTS.md", "rules\n")
         self.write("dev/CLAUDE.md", "edited\n")

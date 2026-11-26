@@ -6,11 +6,11 @@
 set -uo pipefail
 ROLES="${SC_PROFILES:?SC_PROFILES not set}"
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-cd "$ROLES" || exit 0
+cd "$ROLES" || { echo "sc sync: $ROLES not found" >&2; exit 0; }
 # .git is a file in a linked worktree; the lock sits in the common dir so
 # every worktree of the repo shares it
-gitdir="$(git rev-parse --absolute-git-dir)" || exit 0
-common="$(git rev-parse --path-format=absolute --git-common-dir)" || exit 0
+gitdir="$(git rev-parse --absolute-git-dir)" || { echo "sc sync: $ROLES is not a git repository" >&2; exit 0; }
+common="$(git rev-parse --path-format=absolute --git-common-dir)" || { echo "sc sync: no git common dir in $ROLES" >&2; exit 0; }
 flag="$gitdir/superclaude-sync-failed"
 fail() { printf '%s\n' "$1" ${drift:+"$drift"} > "$flag"; echo "sc sync: $1" >&2; exit 0; }
 # wait for a running sync instead of leaving this session's notes behind;
@@ -57,18 +57,20 @@ if ! git diff --cached --no-renames --name-only -z | only_sync_paths; then
     fail "staged files outside memory/ and notes/ (e.g. ${other:-?}): commit or unstage them, then sc sync"
 fi
 
-branch="$(git symbolic-ref --quiet --short HEAD)" || exit 0
-remote="$(git config --get "branch.$branch.remote")" || exit 0
-target="$(git config --get "branch.$branch.merge")" || exit 0
-upstream_ref="$(git rev-parse --symbolic-full-name '@{upstream}')" || exit 0
-upstream="$(git rev-parse --verify "$upstream_ref")" || exit 0
-[[ "$target" == refs/heads/* ]] || exit 0
+branch="$(git symbolic-ref --quiet --short HEAD)" || fail "detached HEAD, nothing synced: check out a branch, then sc sync"
+remote="$(git config --get "branch.$branch.remote")" || fail "branch $branch has no upstream, nothing synced: git branch -u <remote>/$branch"
+target="$(git config --get "branch.$branch.merge")" || fail "branch $branch has no upstream, nothing synced: git branch -u <remote>/$branch"
+upstream_ref="$(git rev-parse --symbolic-full-name '@{upstream}')" || fail "branch $branch has no upstream, nothing synced: git branch -u <remote>/$branch"
+upstream="$(git rev-parse --verify "$upstream_ref")" || fail "cannot read $upstream_ref, nothing pushed"
+[[ "$target" == refs/heads/* ]] || fail "upstream of $branch is $target, not a branch: nothing synced"
 same_branch() {
     [[ "$(git symbolic-ref --quiet --short HEAD)" == "$branch" &&
        "$(git config --get "branch.$branch.remote")" == "$remote" &&
        "$(git config --get "branch.$branch.merge")" == "$target" &&
        "$(git rev-parse --symbolic-full-name '@{upstream}')" == "$upstream_ref" ]]
 }
+# another session switched branch or upstream mid-sync: stop, and say so
+still_same() { same_branch || fail "branch changed during sync (now: $(git symbolic-ref --quiet --short HEAD || echo detached HEAD)), nothing pushed: retry sc sync"; }
 
 # Check each commit: a net diff could hide an unrelated change and its revert.
 # Also reject merge/empty commits, whose intent this hook cannot establish.
@@ -84,9 +86,9 @@ only_sync_commits() {
             only_sync_paths require-path || return 1
     done
 }
-head="$(git rev-parse "refs/heads/$branch")" || exit 0
+head="$(git rev-parse "refs/heads/$branch")" || fail "cannot read branch $branch, nothing pushed"
 only_sync_commits "$upstream" "$head" || fail "local commits outside memory/ and notes/ or a merge commit: push them by hand"
-same_branch || exit 0
+still_same
 
 scope=(':(glob)*/memory/**' ':(glob)*/notes/**')
 # memory/ and notes/ hold text a role writes, not data: new binary or large
@@ -118,16 +120,16 @@ done < <(git diff --cached --no-renames --name-only -z -- "${scope[@]}")
 if (( ${#commit_paths[@]} )); then
     # --only keeps unrelated files out even if another session stages them
     # after the initial check. Such changes remain in the shared index.
-    same_branch || exit 0
+    still_same
     git --literal-pathspecs commit --only -qm "sync: $(hostname -s) $(date +%F_%H:%M)" -- \
         "${commit_paths[@]}" >/dev/null 2>&1 || fail "commit failed (pre-commit hook or index.lock?)"
 fi
-same_branch || exit 0
+still_same
 timeout 20 git fetch -q "$remote" "$target" >/dev/null 2>&1 || fail "fetch from $remote failed"
-same_branch || exit 0
+still_same
 # the tracking ref, not FETCH_HEAD: a concurrent fetch may rewrite FETCH_HEAD
-fetched="$(git rev-parse --verify "$upstream_ref")" || exit 0
-head="$(git rev-parse "refs/heads/$branch")" || exit 0
+fetched="$(git rev-parse --verify "$upstream_ref")" || fail "cannot read $upstream_ref after fetch, nothing pushed"
+head="$(git rev-parse "refs/heads/$branch")" || fail "cannot read branch $branch, nothing pushed"
 if git merge-base --is-ancestor "$head" "$fetched"; then
     git merge -q --ff-only "$fetched" >/dev/null 2>&1 || fail "fast-forward failed (local changes in the way?)"
 elif ! git merge-base --is-ancestor "$fetched" "$head"; then
@@ -148,7 +150,7 @@ elif ! git merge-base --is-ancestor "$fetched" "$head"; then
     fi
     git worktree remove --force "$tmp" >/dev/null 2>&1
     [[ -n "$new" ]] || fail "memory conflict with $remote: resolve by hand in $ROLES"
-    same_branch || exit 0
+    still_same
     # update-ref with the old value fails if another session committed meanwhile
     git update-ref -m "sc sync: replay" "refs/heads/$branch" "$new" "$head" >/dev/null 2>&1 ||
         fail "branch moved during replay, retry: sc sync"
@@ -158,11 +160,11 @@ elif ! git merge-base --is-ancestor "$fetched" "$head"; then
         fail "replayed sync commits not applied (local changes in the way?)"
     fi
 fi
-same_branch || exit 0
-upstream="$(git rev-parse --verify "$upstream_ref")" || exit 0
-head="$(git rev-parse "refs/heads/$branch")" || exit 0
-only_sync_commits "$upstream" "$head" || exit 0
-same_branch || exit 0
+still_same
+upstream="$(git rev-parse --verify "$upstream_ref")" || fail "cannot read $upstream_ref, nothing pushed"
+head="$(git rev-parse "refs/heads/$branch")" || fail "cannot read branch $branch, nothing pushed"
+only_sync_commits "$upstream" "$head" || fail "local commits outside memory/ and notes/ or a merge commit: push them by hand"
+still_same
 # Explicit refspec and SHA avoid push.default, followTags, and any newer commit
 # created by another session between the audit above and this push.
 timeout 20 git -c push.followTags=false push -q --no-follow-tags \
