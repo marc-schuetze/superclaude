@@ -126,6 +126,9 @@ class SyncScopeTests(unittest.TestCase):
         self.assertEqual(self.git("diff", "--cached", "--binary"), before)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
         self.assertEqual(self.remote_head(), self.initial)
+        flag = (self.repo / ".git/superclaude-sync-failed").read_text()
+        self.assertIn("staged files outside memory/ and notes/", flag)
+        self.assertIn("home/CLAUDE.md", flag)
 
     def test_already_staged_memory_deletions_are_synced(self):
         self.git("rm", "home/memory/known.md", "home/notes/old.md")

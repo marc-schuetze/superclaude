@@ -51,7 +51,11 @@ only_sync_paths() {
     done
     [[ "${1:-allow-empty}" == allow-empty || "$seen" == 1 ]]
 }
-git diff --cached --no-renames --name-only -z | only_sync_paths || exit 0
+# reported, not skipped silently: a forgotten staged file would block every later sync unseen
+if ! git diff --cached --no-renames --name-only -z | only_sync_paths; then
+    other="$(git diff --cached --no-renames --name-only | grep -vE '^[^/]+/(memory|notes)/' | head -n1)"
+    fail "staged files outside memory/ and notes/ (e.g. ${other:-?}): commit or unstage them, then sc sync"
+fi
 
 branch="$(git symbolic-ref --quiet --short HEAD)" || exit 0
 remote="$(git config --get "branch.$branch.remote")" || exit 0
